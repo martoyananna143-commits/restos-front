@@ -1,0 +1,39 @@
+[package]
+name = "resty_form_alpha"
+version = "0.1.0"
+authors = ["AtariOverlord09 <anatgo99088@gmail.com>"]
+edition = "2021"
+
+[dependencies]
+# Dioxus with web features (includes signals, macros, html)
+dioxus = { version = "0.7", features = ["web", "router"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+gloo-net = "0.6"      # Lightweight HTTP client for WASM
+gloo-timers = "0.3"   # Timers for WASM
+gloo-storage = "0.3"  # LocalStorage for WASM
+urlencoding = "2.1"   # URL percent-encoding for form submissions
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Location",
+    "UrlSearchParams",
+    "console",
+    "FormData",
+    "File",
+    "FileList",
+    "HtmlInputElement",
+] }
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true           # Link-time optimization
+codegen-units = 1    # Single codegen unit for better optimization
+panic = "abort"      # Smaller binary, no unwinding
+strip = true         # Strip symbols
+incremental = false
+
+

@@ -1,0 +1,16 @@
+[application]
+name = "resty_form_alpha"
+
+[web.app]
+title = "Форма оценки"
+
+[web.resource]
+style = []
+script = ["https://telegram.org/js/telegram-web-app.js"]
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[web.resource.dev]
+script = []
