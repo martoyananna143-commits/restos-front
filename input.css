@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+/* Scan all Rust source files for Tailwind class usage */
+@source "./src/**/*.{rs,html}";
+
+/* Legacy design system — imported so Tailwind owns the full CSS output.
+   Replace class names with Tailwind utilities over time, then remove this. */
+@import "./assets/styling/main.css";
+
+/* ── Design system tokens ───────────────────────────────────────────────────
+   These mirror the CSS variables from the old main.css so components that
+   still reference var(--amber) etc. keep working during migration.
+   ────────────────────────────────────────────────────────────────────────── */
+@theme {
+  /* Fonts */
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-serif: 'Instrument Serif', Georgia, serif;
+
+  /* Brand / amber */
+  --color-amber:      #f5a623;
+  --color-amber-dim:  rgba(245,166,35,0.15);
+  --color-amber-glow: rgba(245,166,35,0.08);
+
+  /* Dark backgrounds */
+  --color-bg:   #0e0f11;
+  --color-bg2:  #161719;
+  --color-bg3:  #1e2023;
+  --color-bg4:  #252729;
+
+  /* Surfaces (glass-like) */
+  --color-surface:  rgba(255,255,255,0.04);
+  --color-surface2: rgba(255,255,255,0.07);
+  --color-surface3: rgba(255,255,255,0.10);
+
+  /* Borders */
+  --color-border:  rgba(255,255,255,0.08);
+  --color-border2: rgba(255,255,255,0.14);
+
+  /* Text */
+  --color-text:  #f0ede8;
+  --color-text2: #9b9891;
+  --color-text3: #5e5c59;
+
+  /* Status */
+  --color-green:     #4ade80;
+  --color-green-dim: rgba(74,222,128,0.12);
+  --color-red:       #f87171;
+  --color-red-dim:   rgba(248,113,113,0.12);
+  --color-blue:      #60a5fa;
+  --color-blue-dim:  rgba(96,165,250,0.12);
+
+  /* Border radius */
+  --radius-sm: 10px;
+  --radius:    16px;
+
+  /* Transition */
+  --default-transition-duration: 150ms;
+}
+
+/* ── CSS custom properties (kept for backward compat during migration) ────── */
+:root {
+  --bg:          #0e0f11;
+  --bg2:         #161719;
+  --bg3:         #1e2023;
+  --bg4:         #252729;
+  --surface:     rgba(255,255,255,0.04);
+  --surface2:    rgba(255,255,255,0.07);
+  --surface3:    rgba(255,255,255,0.10);
+  --border:      rgba(255,255,255,0.08);
+  --border2:     rgba(255,255,255,0.14);
+  --amber:       #f5a623;
+  --amber-dim:   rgba(245,166,35,0.15);
+  --amber-glow:  rgba(245,166,35,0.08);
+  --text:        #f0ede8;
+  --text2:       #9b9891;
+  --text3:       #5e5c59;
+  --green:       #4ade80;
+  --green-dim:   rgba(74,222,128,0.12);
+  --red:         #f87171;
+  --red-dim:     rgba(248,113,113,0.12);
+  --blue:        #60a5fa;
+  --blue-dim:    rgba(96,165,250,0.12);
+  --serif:       'Instrument Serif', Georgia, serif;
+  --sans:        'DM Sans', system-ui, sans-serif;
+  --r:           16px;
+  --r-sm:        10px;
+  --transition:  150ms ease;
+}

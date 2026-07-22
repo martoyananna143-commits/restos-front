@@ -40,7 +40,7 @@ pub fn NumberInput(value: Signal<Option<f64>>, placeholder: String, disabled: bo
     let current = value();
     rsx! {
         div {
-            div { class: "label-text gap-sm", style: "margin-bottom:8px;", "Оценка (1–5)" }
+            div { class: "label-text gap-sm", style: "margin-bottom:8px;", "Баллы (1–5)" }
             div { class: "num-rating",
                 for n in 1..=5_u8 {
                     {

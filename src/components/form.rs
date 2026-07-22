@@ -17,12 +17,13 @@ enum Phase {
     Select,
     Loading,
     Fill {
-        evaluation_id: i64,
-        criteria:      Vec<Criterion>,
-        employee_name: String,
-        set_name:      String,
+        evaluation_id:   i64,
+        criteria:        Vec<Criterion>,
+        employee_name:   String,
+        set_name:        String,
+        initial_answers: Vec<Answer>,
     },
-    Success { score: f64, employee_name: String, set_name: String, total: usize },
+    Success { evaluation_id: i64, score: f64, employee_name: String, set_name: String, total: usize },
     Error(String),
 }
 
@@ -30,6 +31,33 @@ enum Phase {
 
 #[component]
 pub fn EvaluationForm(
+    token: String,
+    #[props(default)]
+    resume_evaluation_id: Option<i64>,
+    on_done: EventHandler<()>,
+    on_back: EventHandler<()>,
+) -> Element {
+    match resume_evaluation_id {
+        Some(id) if id > 0 => rsx! {
+            EvalFormResume {
+                token: token.clone(),
+                evaluation_id: id,
+                on_done,
+                on_back,
+            }
+        },
+        _ => rsx! {
+            EvalFormInner {
+                token: token.clone(),
+                on_done,
+                on_back,
+            }
+        },
+    }
+}
+
+#[component]
+fn EvalFormInner(
     token: String,
     on_done: EventHandler<()>,
     on_back: EventHandler<()>,
@@ -57,6 +85,7 @@ pub fn EvaluationForm(
                     criteria:      resp.criteria,
                     employee_name: ename2,
                     set_name:      sname2,
+                    initial_answers: vec![],
                 }),
                 Err(e) => phase.set(Phase::Error(e)),
             }
@@ -77,27 +106,42 @@ pub fn EvaluationForm(
                 div { class: "screen-scroll",
                     div { style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:300px;gap:12px;",
                         div { class: "loader-ring" }
-                        div { class: "text2", "Подготовка оценки..." }
+                        div { class: "text2", "Подготовка замера..." }
                     }
                 }
             }
         },
-        Phase::Fill { evaluation_id, criteria, employee_name, set_name } => rsx! {
+        Phase::Fill {
+            evaluation_id,
+            criteria,
+            employee_name,
+            set_name,
+            initial_answers,
+        } => rsx! {
             FillPhase {
                 token: token.clone(),
                 evaluation_id,
                 criteria,
                 employee_name: employee_name.clone(),
                 set_name: set_name.clone(),
+                initial_answers: initial_answers.clone(),
                 on_done: move |(score, ename, sname, total): (f64, String, String, usize)| {
-                    phase.set(Phase::Success { score, employee_name: ename, set_name: sname, total });
+                    phase.set(Phase::Success {
+                        evaluation_id,
+                        score,
+                        employee_name: ename,
+                        set_name: sname,
+                        total,
+                    });
                 },
                 on_error: move |msg: String| phase.set(Phase::Error(msg)),
                 on_back:  move |_| phase.set(Phase::Select),
             }
         },
-        Phase::Success { score, employee_name, set_name, total } => rsx! {
+        Phase::Success { evaluation_id, score, employee_name, set_name, total } => rsx! {
             SuccessScreen {
+                token: token.clone(),
+                evaluation_id,
                 score,
                 employee_name,
                 set_name,
@@ -122,6 +166,81 @@ pub fn EvaluationForm(
                 }
             }
         },
+    }
+}
+
+#[component]
+fn EvalFormResume(
+    token: String,
+    evaluation_id: i64,
+    on_done: EventHandler<()>,
+    on_back: EventHandler<()>,
+) -> Element {
+    let t = token.clone();
+    let res = use_resource(move || {
+        let tok = t.clone();
+        let eid = evaluation_id;
+        async move { api::fetch_evaluation_resume(&tok, eid).await }
+    });
+    let mut success = use_signal(|| None::<(f64, String, String, usize)>);
+
+    if let Some((score, ename, sname, total)) = success() {
+        return rsx! {
+            SuccessScreen {
+                token: token.clone(),
+                evaluation_id,
+                score,
+                employee_name: ename,
+                set_name: sname,
+                total,
+                on_done,
+                on_new: move |_| on_back.call(()),
+            }
+        };
+    }
+
+    rsx! {
+        match res() {
+            None => rsx! {
+                div { class: "app-screen",
+                    div { class: "screen-scroll",
+                        div { style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:300px;gap:12px;",
+                            div { class: "loader-ring" }
+                            div { class: "text2", "Загрузка черновика..." }
+                        }
+                    }
+                }
+            },
+            Some(Err(e)) => rsx! {
+                div { class: "app-screen",
+                    div { class: "screen-scroll",
+                        div { style: "padding: 40px 18px; display:flex; flex-direction:column; align-items:center; gap:16px;",
+                            div { style: "font-size:40px;", "⚠️" }
+                            div { style: "font-size:15px; color:var(--red); text-align:center;", "{e}" }
+                            button {
+                                class: "btn-primary",
+                                style: "margin-top:8px;",
+                                onclick: move |_| on_back.call(()),
+                                "Назад"
+                            }
+                        }
+                    }
+                }
+            },
+            Some(Ok(r)) => rsx! {
+                FillPhase {
+                    token: token.clone(),
+                    evaluation_id: r.evaluation_id,
+                    criteria: r.criteria.clone(),
+                    employee_name: r.evaluated_employee_name.clone(),
+                    set_name: r.criterion_set_name.clone(),
+                    initial_answers: r.saved_answers.clone(),
+                    on_done: move |(sc, en, sn, tot)| success.set(Some((sc, en, sn, tot))),
+                    on_error: move |_| {},
+                    on_back: move |_| on_back.call(()),
+                }
+            },
+        }
     }
 }
 
@@ -184,18 +303,29 @@ fn SelectPhase(
         }
     });
 
-    let selected_count = [selected_emp().is_some(), selected_set().is_some(), selected_type().is_some()]
-        .iter().filter(|&&b| b).count();
-    let step_total = if types_ok.len() > 1 { 3 } else { 2 };
-    let can_start = selected_emp().is_some() && selected_type().is_some() && selected_set().is_some();
+    let selected_count = [
+        selected_emp().is_some(),
+        selected_set().is_some(),
+        selected_type().is_some(),
+    ].iter().filter(|&&b| b).count();
+    let step_total = 3;
+    let can_start = selected_emp().is_some() && selected_set().is_some()
+        && selected_type().is_some();
     let mini_pct = selected_count * 100 / step_total.max(1);
 
     let emps_for_closure = emps_ok.clone();
     let sets_for_closure = sets_ok.clone();
+    let types_for_closure = types_ok.clone();
     let on_submit = move |_: Event<MouseData>| {
         let emp_id  = match selected_emp()  { Some(v) => v, None => return };
-        let type_id = match selected_type() { Some(v) => v, None => return };
         let set_id  = match selected_set()  { Some(v) => v, None => return };
+        // Use explicitly selected type, or auto-pick first available
+        let type_id = match selected_type()
+            .or_else(|| types_for_closure.first().map(|t| t.id))
+        {
+            Some(v) => v,
+            None => return,
+        };
 
         let ename = emps_for_closure.iter().find(|e| e.id == emp_id)
             .map(|e| e.full_name.clone()).unwrap_or_default();
@@ -224,8 +354,8 @@ fn SelectPhase(
                         span { style: "font-size:16px; color:var(--text2);", "←" }
                     }
                     div { style: "flex:1;",
-                        div { style: "font-size:11px; color:var(--text3); font-weight:500; letter-spacing:0.05em; text-transform:uppercase;", "Оценки" }
-                        div { style: "font-size:18px; font-weight:500; letter-spacing:-0.02em; margin-top:1px;", "Новая оценка" }
+                        div { style: "font-size:11px; color:var(--text3); font-weight:500; letter-spacing:0.05em; text-transform:uppercase;", "Замеры" }
+                        div { style: "font-size:18px; font-weight:500; letter-spacing:-0.02em; margin-top:1px;", "Новый замер" }
                     }
                     span { class: "eval-step-badge", "{selected_count} / {step_total}" }
                 }
@@ -333,10 +463,18 @@ fn SelectPhase(
                         }
                     }
 
-                    // ── Тип оценки (only if >1) ───────────
-                    if types_ok.len() > 1 {
+                    // ── Тип оценки ──
+                    if types_ok.is_empty() {
+                        div { style: "padding: 12px 18px 0;",
+                            div {
+                                style: "font-size:12px; color:var(--amber); background:var(--amber-bg,#fff8e1); border-radius:8px; padding:8px 12px;",
+                                "⚠ Нет типов замеров. Создайте тип в разделе «Настройки»."
+                            }
+                        }
+                    }
+                    if !types_ok.is_empty() {
                         div { style: "padding: 18px 18px 0;",
-                            div { class: "eval-section-label", "Тип оценки" }
+                            div { class: "eval-section-label", "Тип замера" }
                             div { class: "eval-type-row",
                                 for t in types_ok.iter() {
                                     {
@@ -379,7 +517,7 @@ fn SelectPhase(
                             style: "flex:2;",
                             disabled: !can_start,
                             onclick: on_submit,
-                            "Начать оценку →"
+                            "Начать замер →"
                         }
                     }
                 }
@@ -390,10 +528,28 @@ fn SelectPhase(
 
 // ── Phase 2: Fill ────────────────────────────────────────────────────────────
 
+/// Commit open text fields to `value` so progress / submit match what the user typed (incl. without blur).
+fn flush_text_answers_to_value(states: &mut [CriterionState]) {
+    for s in states.iter_mut() {
+        if matches!(s.criterion.value_type.as_str(), "boolean" | "number") {
+            continue;
+        }
+        let t = s.text_buffer.read().trim().to_string();
+        if t.is_empty() {
+            s.value.set(None);
+        } else {
+            s.value.set(Some(AnswerValue::Text(t.clone())));
+            s.text_buffer.set(t);
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 struct CriterionState {
     criterion: Criterion,
     value:     Signal<Option<AnswerValue>>,
+    /// For text/string criteria: live textarea text; `value` is updated on blur (and before submit).
+    text_buffer: Signal<String>,
     comment:   Signal<Option<String>>,
 }
 
@@ -404,24 +560,43 @@ fn FillPhase(
     criteria:      Vec<Criterion>,
     employee_name: String,
     set_name:      String,
+    #[props(default)]
+    initial_answers: Vec<Answer>,
     on_done:  EventHandler<(f64, String, String, usize)>,
     on_error: EventHandler<String>,
     on_back:  EventHandler<()>,
 ) -> Element {
     let mut states_sig: Signal<Vec<CriterionState>> = use_signal(Vec::new);
     use_effect(move || {
-        if states_sig.read().is_empty() {
+        if states_sig.read().is_empty() && !criteria.is_empty() {
             states_sig.set(
-                criteria.iter().map(|c| CriterionState {
-                    criterion: c.clone(),
-                    value:   Signal::new(None),
-                    comment: Signal::new(None),
-                }).collect()
+                criteria
+                    .iter()
+                    .map(|c| {
+                        let (init_v, init_c) = initial_answers
+                            .iter()
+                            .find(|a| a.criterion_id == c.id)
+                            .map(|a| (Some(a.value.clone()), a.comment.clone()))
+                            .unwrap_or((None, None));
+                        let init_buf = match &init_v {
+                            Some(AnswerValue::Text(t)) => t.clone(),
+                            _ => String::new(),
+                        };
+                        CriterionState {
+                            criterion: c.clone(),
+                            value: Signal::new(init_v),
+                            text_buffer: Signal::new(init_buf),
+                            comment: Signal::new(init_c),
+                        }
+                    })
+                    .collect(),
             );
         }
     });
     let states = states_sig.read().clone();
     let mut submitting = use_signal(|| false);
+    let mut saving_draft = use_signal(|| false);
+    let mut submit_err = use_signal(|| None::<String>);
     let total = states.len();
 
     // Read answered count (subscribes parent to all value signals)
@@ -464,11 +639,13 @@ fn FillPhase(
     let tok  = token.clone();
     let ename = employee_name.clone();
     let sname = set_name.clone();
-    let states_clone = states.clone();
+    let mut states_clone = states.clone();
 
     let on_submit = move |_: Event<MouseData>| {
         if *submitting.read() { return; }
         submitting.set(true);
+        submit_err.set(None);
+        flush_text_answers_to_value(&mut states_clone);
         let answers: Vec<Answer> = states_clone.iter().filter_map(|s| {
             let v = s.value.read().clone()?;
             Some(Answer {
@@ -485,20 +662,103 @@ fn FillPhase(
         spawn(async move {
             match api::submit_evaluation(&tok2, evaluation_id, req).await {
                 Ok(resp) => on_done.call((resp.score_percentage, en2, sn2, tot2)),
-                Err(e)   => { submitting.set(false); on_error.call(e); }
+                Err(e)   => {
+                    submitting.set(false);
+                    submit_err.set(Some(e.clone()));
+                    on_error.call(e);
+                }
             }
         });
     };
 
-    let on_save_draft = move |_: Event<MouseData>| {
-        // Just go back — draft is not submitted
-        on_back.call(());
+    let states_draft = states.clone();
+    let tok_draft = token.clone();
+    let eid_draft = evaluation_id;
+    let on_back_draft = on_back;
+
+    let on_save_draft = {
+        let mut states_draft = states_draft.clone();
+        let tok_draft = tok_draft.clone();
+        let eid_draft = eid_draft;
+        move |_: Event<MouseData>| {
+            if *saving_draft.read() {
+                return;
+            }
+            saving_draft.set(true);
+            submit_err.set(None);
+            flush_text_answers_to_value(&mut states_draft);
+            let answers: Vec<Answer> = states_draft
+                .iter()
+                .filter_map(|s| {
+                    let v = s.value.read().clone()?;
+                    Some(Answer {
+                        criterion_id: s.criterion.id,
+                        value: v,
+                        comment: s.comment.read().clone(),
+                    })
+                })
+                .collect();
+            let req = SubmitRequest {
+                answers,
+                comment: None,
+            };
+            let tok2 = tok_draft.clone();
+            let eid = eid_draft;
+            spawn(async move {
+                let _ = api::save_evaluation_draft(&tok2, eid, &req).await;
+                saving_draft.set(false);
+            });
+        }
+    };
+
+    let on_back_save = {
+        let mut states_draft = states_draft.clone();
+        let tok_draft = tok_draft.clone();
+        let eid_draft = eid_draft;
+        let on_back_draft = on_back_draft;
+        move |_: Event<MouseData>| {
+            if *saving_draft.read() {
+                return;
+            }
+            saving_draft.set(true);
+            submit_err.set(None);
+            flush_text_answers_to_value(&mut states_draft);
+            let answers: Vec<Answer> = states_draft
+                .iter()
+                .filter_map(|s| {
+                    let v = s.value.read().clone()?;
+                    Some(Answer {
+                        criterion_id: s.criterion.id,
+                        value: v,
+                        comment: s.comment.read().clone(),
+                    })
+                })
+                .collect();
+            let req = SubmitRequest {
+                answers,
+                comment: None,
+            };
+            let tok2 = tok_draft.clone();
+            let eid = eid_draft;
+            spawn(async move {
+                let _ = api::save_evaluation_draft(&tok2, eid, &req).await;
+                saving_draft.set(false);
+                on_back_draft.call(());
+            });
+        }
     };
 
     let remaining = total.saturating_sub(answered);
 
     rsx! {
         div { class: "app-screen",
+
+            if let Some(em) = submit_err() {
+                div {
+                    style: "padding:10px 16px; margin:8px 12px 0; background:rgba(239,68,68,0.12); border-radius:8px; font-size:13px; color:var(--red);",
+                    "{em}"
+                }
+            }
 
             // ── Sticky progress header ─────────────────
             div {
@@ -508,7 +768,7 @@ fn FillPhase(
                     div { style: "display:flex; align-items:center; gap:10px;",
                         button {
                             class: "prog-back-btn",
-                            onclick: move |_| on_back.call(()),
+                            onclick: on_back_save,
                             "←"
                         }
                         div {
@@ -623,21 +883,22 @@ fn FillPhase(
                             class: "btn-submit-ready",
                             disabled: *submitting.read(),
                             onclick: on_submit,
-                            if *submitting.read() { "Отправка..." } else { "✓ Отправить оценку" }
+                            if *submitting.read() { "Отправка..." } else { "✓ Завершить замер" }
                         }
                     } else {
                         button {
                             class: "btn-primary",
                             style: "opacity:0.5; cursor:not-allowed;",
                             disabled: true,
-                            "Отправить оценку · осталось {remaining}"
+                            "Завершить замер · осталось {remaining}"
                         }
                     }
                     button {
                         class: "btn-ghost",
                         style: "text-align:center;",
+                        disabled: *saving_draft.read(),
                         onclick: on_save_draft,
-                        "Сохранить черновик"
+                        if *saving_draft.read() { "Сохранение..." } else { "Сохранить черновик" }
                     }
                 }
             }
@@ -650,6 +911,7 @@ fn FillPhase(
 #[component]
 fn CriterionCard(state: CriterionState, index: usize) -> Element {
     let mut val     = state.value;
+    let text_buffer  = state.text_buffer;
     let mut comment = state.comment;
     let mut collapsed         = use_signal(|| false);
     let mut show_comment_inp  = use_signal(|| false);
@@ -726,7 +988,7 @@ fn CriterionCard(state: CriterionState, index: usize) -> Element {
                     match c.value_type.as_str() {
                         "boolean" => rsx! { YnInput { value: val } },
                         "number"  => rsx! { ScaleInput { value: val } },
-                        _         => rsx! { TextQInput { value: val } },
+                        _         => rsx! { TextQInput { value: val, text_buffer } },
                     }
 
                     // Comment section
@@ -890,20 +1152,21 @@ fn ScaleInput(value: Signal<Option<AnswerValue>>) -> Element {
 }
 
 #[component]
-fn TextQInput(value: Signal<Option<AnswerValue>>) -> Element {
+fn TextQInput(value: Signal<Option<AnswerValue>>, text_buffer: Signal<String>) -> Element {
     rsx! {
         textarea {
             class: "q-text-inp",
             rows: "3",
             placeholder: "Напишите ваш отзыв...",
-            value: match value.read().clone() {
-                Some(AnswerValue::Text(t)) => t,
-                _ => String::new(),
-            },
+            value: "{text_buffer}",
             oninput: move |e| {
-                let v = e.value();
-                value.set(if v.is_empty() { None } else { Some(AnswerValue::Text(v)) });
-            }
+                text_buffer.set(e.value());
+            },
+            onblur: move |_| {
+                let t = text_buffer.read().trim().to_string();
+                value.set(if t.is_empty() { None } else { Some(AnswerValue::Text(t.clone())) });
+                text_buffer.set(t);
+            },
         }
     }
 }
@@ -912,6 +1175,8 @@ fn TextQInput(value: Signal<Option<AnswerValue>>) -> Element {
 
 #[component]
 fn SuccessScreen(
+    token: String,
+    evaluation_id: i64,
     score: f64,
     employee_name: String,
     set_name: String,
@@ -936,12 +1201,12 @@ fn SuccessScreen(
                 div { style: "padding:32px 18px 0; display:flex; flex-direction:column; align-items:center; text-align:center; gap:12px;",
                     div { class: "success-check", "✓" }
                     div { class: "success-serif",
-                        "Оценка"
+                        "Замер"
                         br {}
                         em { style: "font-style:italic; color:var(--amber);", "отправлена" }
                     }
                     div { style: "font-size:13px; color:var(--text2); line-height:1.55; max-width:240px;",
-                        "Оценка сотрудника сохранена и доступна в разделе аналитики"
+                        "Замер сотрудника сохранён и доступен в разделе аналитики"
                     }
                 }
 
@@ -980,20 +1245,56 @@ fn SuccessScreen(
                     }
                 }
 
+                // ── Export ─────────────────────────────
+                {
+                    let api_base = crate::api::get_api_base_pub();
+                    let excel_url = format!(
+                        "{}/api/web/evaluations/{}/export/excel?access_token={}",
+                        api_base, evaluation_id, token
+                    );
+                    let pdf_url = format!(
+                        "{}/api/web/evaluations/{}/export/pdf?access_token={}",
+                        api_base, evaluation_id, token
+                    );
+                    rsx! {
+                        div { class: "export-section",
+                            span { class: "export-section-label", "Скачать отчёт" }
+                            div { class: "export-cards-row",
+                                a {
+                                    class: "export-card",
+                                    href: "{excel_url}",
+                                    download: "evaluation_{evaluation_id}.xlsx",
+                                    div { class: "export-card-icon", "📊" }
+                                    span { class: "export-card-label", "Excel" }
+                                    span { class: "export-card-sub", "Таблица с\nответами" }
+                                }
+                                a {
+                                    class: "export-card",
+                                    href: "{pdf_url}",
+                                    download: "evaluation_{evaluation_id}.pdf",
+                                    div { class: "export-card-icon", "📄" }
+                                    span { class: "export-card-label", "PDF" }
+                                    span { class: "export-card-sub", "Готовый\nотчёт" }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ── Actions ────────────────────────────
-                div { style: "padding:16px 18px 0; display:flex; flex-direction:column; gap:9px;",
+                div { style: "padding:12px 18px 0; display:flex; flex-direction:column; gap:9px;",
                     div { style: "display:flex; gap:10px;",
                         button {
                             class: "btn-ghost",
                             style: "flex:1; font-size:13px;",
                             onclick: move |_| on_new.call(()),
-                            "Ещё оценку"
+                            "Ещё замер"
                         }
                         button {
                             class: "btn-primary",
                             style: "flex:2; font-size:13px;",
                             onclick: move |_| on_done.call(()),
-                            "К списку оценок"
+                            "К списку замеров"
                         }
                     }
                 }

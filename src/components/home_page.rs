@@ -1,146 +1,223 @@
-//! Dashboard / home page
+//! Organization dashboard.
 
 use dioxus::prelude::*;
+
 use crate::api;
 use crate::auth::AuthState;
+use crate::types::{EvaluationDetail, EvaluationItem, OrgInfo};
 use super::shared::{ErrorView, LoadingView};
 
-fn initials(name: &str) -> String {
-    let parts: Vec<&str> = name.split_whitespace().collect();
-    match parts.as_slice() {
-        [] => "?".to_string(),
-        [one] => one.chars().take(2).collect::<String>().to_uppercase(),
-        [a, b, ..] => format!(
-            "{}{}",
-            a.chars().next().unwrap_or('?'),
-            b.chars().next().unwrap_or('?')
-        ).to_uppercase(),
-    }
+fn score_tone(score: f64) -> &'static str {
+    if score >= 80.0 { "score-good" } else if score >= 60.0 { "score-warn" } else { "score-bad" }
 }
 
-fn av_color(name: &str) -> &'static str {
-    match name.bytes().next().unwrap_or(0) % 4 {
-        0 => "av-amber",
-        1 => "av-blue",
-        2 => "av-green",
-        _ => "av-purple",
+fn format_date(value: &str) -> String {
+    let date = value.split('T').next().unwrap_or(value);
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() == 3 {
+        format!("{}.{}.{}", parts[2], parts[1], parts[0])
+    } else {
+        value.to_string()
     }
-}
-
-fn score_color(s: f64) -> &'static str {
-    if s >= 80.0 { "var(--green)" } else if s >= 50.0 { "var(--amber)" } else { "var(--red)" }
 }
 
 #[component]
-pub fn HomePage(token: String, on_navigate: EventHandler<String>) -> Element {
+pub fn HomePage(
+    token: String,
+    can_use_evaluations: bool,
+    on_navigate: EventHandler<String>,
+    on_switch_auth: EventHandler<AuthState>,
+) -> Element {
     let t = token.clone();
     let data = use_resource(move || {
         let tok = t.clone();
-        async move { api::fetch_analytics(&tok).await }
+        async move { api::fetch_evaluations(&tok).await }
     });
 
-    // Get user name from auth state for greeting
     let auth = AuthState::load();
-    let user_name = auth.map(|a| a.name).unwrap_or_default();
+    let user_name = auth.as_ref().map(|state| state.name.clone()).unwrap_or_default();
+    let is_superuser = auth.as_ref().map(|state| state.is_superuser).unwrap_or(false);
+    let available_orgs: Vec<OrgInfo> = auth.as_ref().map(|state| state.available_orgs.clone()).unwrap_or_default();
+    let current_org_id = auth.as_ref().map(|state| state.org_id).unwrap_or_default();
+    let current_org_name = available_orgs
+        .iter()
+        .find(|org| org.id == current_org_id)
+        .map(|org| org.name.clone())
+        .unwrap_or_else(|| "Текущая организация".to_string());
+
+    let mut org_menu_open = use_signal(|| false);
+    let mut switching = use_signal(|| false);
+    let mut switch_error: Signal<Option<String>> = use_signal(|| None);
 
     match data() {
-        None => rsx! { LoadingView { message: "Загрузка...".to_string() } },
-        Some(Err(e)) => rsx! { ErrorView { message: e } },
-        Some(Ok(d)) => {
-            let avg_str = format!("{:.1}", d.average_score);
-            let scores  = d.top_employees.clone();
+        None => rsx! { LoadingView { message: "Загрузка главной...".to_string() } },
+        Some(Err(error)) => rsx! { ErrorView { message: error } },
+        Some(Ok(evaluations)) => {
+            let is_personal_view = !can_use_evaluations;
+            let mut completed: Vec<EvaluationItem> = evaluations
+                .into_iter()
+                .filter(|item| item.status.as_deref() == Some("completed") && item.score_percentage.is_some())
+                .collect();
+            completed.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+            let average = if completed.is_empty() {
+                None
+            } else {
+                Some(completed.iter().filter_map(|item| item.score_percentage).sum::<f64>() / completed.len() as f64)
+            };
 
             rsx! {
-                div { class: "app-screen",
-                    div { class: "hero-glow" }
-                    div { class: "screen-scroll",
-
-                        // Top bar
-                        div { style: "display:flex; align-items:center; justify-content:space-between; padding:16px 20px 0; position:relative; z-index:1;",
-                            div {
-                                div { class: "heading-lg", style: "margin-top:2px;", "Добро пожаловать" }
-                                span { class: "label-text", "{user_name}" }
-                            }
-                            div {
-                                class: "av av-amber",
-                                title: "Выйти",
-                                onclick: move |_| on_navigate.call("logout".to_string()),
-                                style: "cursor:pointer;",
-                                { initials(&user_name) }
-                            }
-                        }
-
-                        // Stats row
-                        div { class: "stats-row", style: "margin-top:16px;",
-                            div { class: "stat-card",
-                                span { class: "label-text", "Оценок" }
-                                div { class: "stat-num", "{d.total_evaluations}" }
-                                span { class: "caption-text", style: "margin-top:4px; display:block;", "всего" }
-                            }
-                            div { class: "stat-card",
-                                span { class: "label-text", "Ср. балл" }
-                                div { class: "stat-num", style: "color:var(--amber);",
-                                    "{avg_str}" span { "%" }
+                div { class: "app-screen home-dashboard",
+                    div { class: "screen-scroll dashboard-scroll",
+                        header { class: "dashboard-header",
+                            div { class: "dashboard-identity",
+                                span { class: "dashboard-eyebrow", "{current_org_name}" }
+                                h1 { "Здравствуйте, {user_name}" }
+                                p { class: "dashboard-intro", "Вот актуальные результаты завершённых замеров." }
+                                if is_superuser {
+                                    span { class: "badge badge-amber", "Суперюзер" }
                                 }
                             }
-                            div { class: "stat-card",
-                                span { class: "label-text", "Сотруд." }
-                                div { class: "stat-num", "{d.employees_count}" }
-                            }
-                        }
-
-                        // Quick actions
-                        div { class: "pad", style: "margin-top:24px;",
-                            span { class: "label-text", "Быстрые действия" }
-                            div { class: "actions-grid", style: "margin-top:10px;",
-                                ActionCard { icon: "✏️", title: "Оценить", desc: "Новая оценка", amber: true,
-                                    on_click: move |_: ()| on_navigate.call("form".to_string()) }
-                                ActionCard { icon: "⭐", title: "Оценки", desc: "История",
-                                    amber: false, on_click: move |_: ()| on_navigate.call("evaluations".to_string()) }
-                                ActionCard { icon: "📈", title: "Аналитика", desc: "Статистика",
-                                    amber: false, on_click: move |_: ()| on_navigate.call("analytics".to_string()) }
-                                ActionCard { icon: "👥", title: "Команда", desc: "Сотрудники",
-                                    amber: false, on_click: move |_: ()| on_navigate.call("employees".to_string()) }
-                            }
-                        }
-
-                        // Top employees ranking
-                        if !scores.is_empty() {
-                            div { class: "pad", style: "margin-top:24px;",
-                                div { class: "section-header",
-                                    span { class: "label-text", "Рейтинг сотрудников" }
+                            div { class: "dashboard-header-actions",
+                                if available_orgs.len() > 1 {
+                                    button {
+                                        class: "organization-switcher",
+                                        r#type: "button",
+                                        aria_label: "Сменить организацию",
+                                        aria_expanded: if org_menu_open() { "true" } else { "false" },
+                                        onclick: move |_| org_menu_open.set(!org_menu_open()),
+                                        span { aria_hidden: "true", "⌘" }
+                                        span { "Организация" }
+                                        span { class: if org_menu_open() { "switcher-chevron switcher-chevron--open" } else { "switcher-chevron" }, aria_hidden: "true", "⌄" }
+                                    }
                                 }
-                                div { class: "card", style: "padding:4px 0;",
-                                    for (i, emp) in scores.iter().take(4).enumerate() {
-                                        {
-                                            let medal = match i { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "·" };
-                                            let av_cls = av_color(&emp.name);
-                                            let init   = initials(&emp.name);
-                                            let clr    = score_color(emp.avg);
-                                            let pct    = emp.avg;
-                                            let name   = emp.name.clone();
-                                            rsx! {
-                                                div { class: "list-row", style: "padding:12px 16px;",
-                                                    span { class: "rank-medal", "{medal}" }
-                                                    div { class: "av av-sm {av_cls}", "{init}" }
-                                                    div { style: "flex:1; min-width:0;",
-                                                        div { class: "rank-name", "{name}" }
-                                                        div { class: "prog-track", style: "margin-top:5px;",
-                                                            div { class: "prog-fill", style: "width:{pct:.0}%;" }
+                                button {
+                                    class: "dashboard-profile-button",
+                                    r#type: "button",
+                                    aria_label: "Открыть профиль",
+                                    onclick: move |_| on_navigate.call("profile".to_string()),
+                                    "{initials(&user_name)}"
+                                }
+                            }
+                        }
+
+                        if org_menu_open() && available_orgs.len() > 1 {
+                            div { class: "organization-menu", role: "menu",
+                                div { class: "organization-menu-title", "Выберите организацию" }
+                                for org in available_orgs.iter() {
+                                    {
+                                        let org_id = org.id;
+                                        let org_name = org.name.clone();
+                                        let is_current = org_id == current_org_id;
+                                        let tok = token.clone();
+                                        rsx! {
+                                            button {
+                                                class: if is_current { "organization-option organization-option--active" } else { "organization-option" },
+                                                r#type: "button",
+                                                role: "menuitem",
+                                                disabled: is_current || switching(),
+                                                onclick: move |_| {
+                                                    let tok = tok.clone();
+                                                    spawn(async move {
+                                                        switching.set(true);
+                                                        switch_error.set(None);
+                                                        match api::switch_org(&tok, org_id).await {
+                                                            Ok(response) => {
+                                                                let state = AuthState {
+                                                                    access_token: response.access_token,
+                                                                    employee_id: response.employee_id,
+                                                                    org_id: response.org_id,
+                                                                    name: response.name,
+                                                                    is_admin: response.is_admin,
+                                                                    is_superuser: response.is_superuser,
+                                                                    available_orgs: response.available_orgs,
+                                                                };
+                                                                state.save();
+                                                                org_menu_open.set(false);
+                                                                on_switch_auth.call(state);
+                                                            }
+                                                            Err(error) => switch_error.set(Some(error)),
                                                         }
-                                                    }
-                                                    span { style: "font-size:15px; font-weight:500; color:{clr}; flex-shrink:0;",
-                                                        "{pct:.1}%"
-                                                    }
-                                                }
+                                                        switching.set(false);
+                                                    });
+                                                },
+                                                span { "{org_name}" }
+                                                if is_current { span { aria_hidden: "true", "✓" } }
                                             }
+                                        }
+                                    }
+                                }
+                                if let Some(error) = switch_error() {
+                                    p { class: "organization-error", role: "alert", "{error}" }
+                                }
+                            }
+                        }
+
+                        main { class: "dashboard-content",
+                            section {
+                                class: "score-panel",
+                                aria_label: if is_personal_view { "Мой средний показатель" } else { "Средний показатель по заведению" },
+                                ScoreRing { value: average, is_personal: is_personal_view }
+                                div { class: "score-panel-copy",
+                                    span { class: "dashboard-eyebrow", "Результат команды" }
+                                    h2 {
+                                        if is_personal_view { "Мой средний показатель" } else { "Средний показатель по заведению" }
+                                    }
+                                    p {
+                                        if completed.is_empty() {
+                                            "Завершённых замеров пока нет. Черновики не учитываются."
+                                        } else {
+                                            if is_personal_view {
+                                                "Рассчитано по связанным с вами завершённым замерам без учёта черновиков."
+                                            } else {
+                                                "Рассчитано по завершённым замерам текущей организации без учёта черновиков."
+                                            }
+                                        }
+                                    }
+                                    if can_use_evaluations {
+                                        button {
+                                            class: "btn-primary score-action",
+                                            r#type: "button",
+                                            onclick: move |_| on_navigate.call("form".to_string()),
+                                            "Новый замер"
+                                        }
+                                    }
+                                }
+                            }
+
+                            section {
+                                class: "recent-measurements",
+                                aria_label: if is_personal_view { "Мои последние замеры" } else { "Последние завершённые замеры" },
+                                div { class: "recent-measurements-head",
+                                    div {
+                                        span { class: "dashboard-eyebrow", "История" }
+                                        h2 {
+                                            if is_personal_view { "Мои последние замеры" } else { "Последние завершённые замеры" }
+                                        }
+                                    }
+                                    if can_use_evaluations && !completed.is_empty() {
+                                        button {
+                                            class: "section-text-button",
+                                            r#type: "button",
+                                            onclick: move |_| on_navigate.call("evaluations".to_string()),
+                                            "Все замеры"
+                                        }
+                                    }
+                                }
+                                if completed.is_empty() {
+                                    div { class: "measurements-empty",
+                                        div { class: "measurements-empty-icon", aria_hidden: "true", "◎" }
+                                        h3 { "Пока нет завершённых замеров" }
+                                        p { "Когда первый замер будет завершён, его результат появится здесь." }
+                                    }
+                                } else {
+                                    div { class: "measurement-list",
+                                        for item in completed.iter().take(5) {
+                                            CompletedMeasurementRow { key: "{item.id}", token: token.clone(), item: item.clone() }
                                         }
                                     }
                                 }
                             }
                         }
-
-                        div { style: "height:20px;" }
                     }
                 }
             }
@@ -149,20 +226,97 @@ pub fn HomePage(token: String, on_navigate: EventHandler<String>) -> Element {
 }
 
 #[component]
-fn ActionCard(
-    icon: &'static str,
-    title: &'static str,
-    desc: &'static str,
-    amber: bool,
-    on_click: EventHandler<()>,
-) -> Element {
+fn ScoreRing(value: Option<f64>, is_personal: bool) -> Element {
+    let shown = value.map(|score| score.clamp(0.0, 100.0));
+    let offset = 339.292 - shown.unwrap_or(0.0) * 3.39292;
+    let tone = shown.map(score_tone).unwrap_or("score-neutral");
+    let label = shown.map(|score| format!("{score:.1}%")).unwrap_or_else(|| "—".to_string());
+    let subject = if is_personal { "Мой средний показатель" } else { "Средний показатель по заведению" };
+    let aria = shown
+        .map(|score| format!("{subject}: {score:.1} процента"))
+        .unwrap_or_else(|| format!("{subject} недоступен: завершённых замеров нет"));
+
     rsx! {
-        div {
-            class: if amber { "action-card action-card-amber" } else { "action-card" },
-            onclick: move |_| on_click.call(()),
-            div { class: "action-icon", "{icon}" }
-            div { class: "action-title", "{title}" }
-            div { class: "action-desc", "{desc}" }
+        div { class: "score-ring {tone}", role: "img", aria_label: "{aria}",
+            svg { view_box: "0 0 140 140", "aria-hidden": "true",
+                circle { class: "score-ring-shadow", cx: "70", cy: "70", r: "54" }
+                circle { class: "score-ring-track", cx: "70", cy: "70", r: "54" }
+                if shown.is_some() {
+                    circle {
+                        class: "score-ring-progress",
+                        cx: "70", cy: "70", r: "54",
+                        stroke_dasharray: "339.292",
+                        stroke_dashoffset: "{offset}",
+                    }
+                }
+            }
+            div { class: "score-ring-center",
+                strong { "{label}" }
+                span { "средний показатель" }
+            }
         }
+    }
+}
+
+#[component]
+fn CompletedMeasurementRow(token: String, item: EvaluationItem) -> Element {
+    let id = item.id;
+    let t = token.clone();
+    let detail = use_resource(move || {
+        let tok = t.clone();
+        async move { api::fetch_evaluation_detail(&tok, id).await }
+    });
+    let score = item.score_percentage.unwrap_or_default();
+    let tone = score_tone(score);
+    let employee_name = item.evaluated_employee_name.clone().unwrap_or_else(|| "Сотрудник".to_string());
+    let employee_initials = initials(&employee_name);
+    let created_at = item.created_at.clone();
+    let created_label = format_date(&created_at);
+    let fallback_type = item.evaluation_type_name.clone().unwrap_or_else(|| "—".to_string());
+    let detail_content = match detail() {
+        None => rsx! { div { class: "measurement-meta measurement-meta--loading", "Загрузка деталей…" } },
+        Some(Ok(info)) => rsx! { MeasurementMeta { detail: info } },
+        Some(Err(_)) => rsx! {
+            div { class: "measurement-meta",
+                span { small { "Тип" } strong { "{fallback_type}" } }
+                span { small { "Шаблон" } strong { "—" } }
+                span { small { "Проверяющий" } strong { "—" } }
+            }
+        },
+    };
+
+    rsx! {
+        article { class: "measurement-row",
+            div { class: "measurement-primary",
+                div { class: "measurement-avatar", aria_hidden: "true", "{employee_initials}" }
+                div { class: "measurement-person",
+                    h3 { "{employee_name}" }
+                    time { datetime: "{created_at}", "{created_label}" }
+                }
+                span { class: "measurement-score {tone}", "{score:.1}%" }
+            }
+            {detail_content}
+        }
+    }
+}
+
+#[component]
+fn MeasurementMeta(detail: EvaluationDetail) -> Element {
+    let template = detail.criterion_set_name.clone().unwrap_or_else(|| "—".to_string());
+    rsx! {
+        div { class: "measurement-meta",
+            span { small { "Тип" } strong { "{detail.evaluation_type_name}" } }
+            span { small { "Шаблон" } strong { "{template}" } }
+            span { small { "Проверяющий" } strong { "{detail.filled_by_employee_name}" } }
+        }
+    }
+}
+
+fn initials(name: &str) -> String {
+    let mut parts = name.split_whitespace().filter_map(|part| part.chars().next());
+    match (parts.next(), parts.next()) {
+        (Some(first), Some(second)) => format!("{first}{second}").to_uppercase(),
+        (Some(first), None) => first.to_uppercase().to_string(),
+        _ => "?".to_string(),
     }
 }

@@ -24,7 +24,7 @@ fn av_color(name: &str) -> &'static str {
 }
 
 fn score_color(s: f64) -> &'static str {
-    if s >= 80.0 { "var(--green)" } else if s >= 50.0 { "var(--amber)" } else { "var(--red)" }
+    if s >= 80.0 { "var(--green)" } else if s >= 60.0 { "var(--amber)" } else { "var(--red)" }
 }
 
 #[component]
@@ -45,6 +45,7 @@ pub fn AnalyticsPage(token: String) -> Element {
             let tab = active_tab.read().clone();
             let top = d.top_employees.clone();
             let crit = d.criteria_stats.clone();
+            let my_rows = d.my_evaluations.clone();
 
             rsx! {
                 div { class: "app-screen",
@@ -53,44 +54,75 @@ pub fn AnalyticsPage(token: String) -> Element {
                         div { class: "page-header",
                             div {
                                 div { class: "page-title", "Аналитика" }
-                                div { class: "page-subtitle", "Статистика организации" }
+                                div { class: "page-subtitle", if d.is_personal_view { "Ваши результаты" } else { "Статистика организации" } }
                             }
                         }
 
                         // Summary cards
                         div { class: "stats-row",
                             div { class: "stat-card",
-                                span { class: "label-text", "Оценок" }
+                                span { class: "label-text", "Замеров" }
                                 div { class: "stat-num", "{d.total_evaluations}" }
                             }
                             div { class: "stat-card",
-                                span { class: "label-text", "Ср. балл" }
+                                span { class: "label-text", if d.is_personal_view { "Ср. за месяц" } else { "Ср. балл" } }
                                 div { class: "stat-num", style: "color:var(--amber);",
-                                    "{avg_str}" span { "%" }
+                                    if d.is_personal_view { "{d.monthly_average_score:.1}" } else { "{avg_str}" } span { "%" }
                                 }
                             }
                             div { class: "stat-card",
-                                span { class: "label-text", "Сотруд." }
-                                div { class: "stat-num", "{d.employees_count}" }
+                                span { class: "label-text", if d.is_personal_view { "Статус" } else { "Сотруд." } }
+                                div { class: "stat-num", if d.is_personal_view { "Я" } else { "{d.employees_count}" } }
                             }
                         }
 
-                        // Tabs
-                        div { class: "tab-bar", style: "margin: 16px 20px 0;",
-                            button {
-                                class: if tab == "employees" { "tab active" } else { "tab" },
-                                onclick: move |_| active_tab.set("employees".to_string()),
-                                "Сотрудники"
-                            }
-                            button {
-                                class: if tab == "criteria" { "tab active" } else { "tab" },
-                                onclick: move |_| active_tab.set("criteria".to_string()),
-                                "Критерии"
+                        if !d.is_personal_view {
+                            // Tabs
+                            div { class: "tab-bar", style: "margin: 16px 20px 0;",
+                                button {
+                                    class: if tab == "employees" { "tab active" } else { "tab" },
+                                    onclick: move |_| active_tab.set("employees".to_string()),
+                                    "Сотрудники"
+                                }
+                                button {
+                                    class: if tab == "criteria" { "tab active" } else { "tab" },
+                                    onclick: move |_| active_tab.set("criteria".to_string()),
+                                    "Критерии"
+                                }
                             }
                         }
 
                         div { class: "pad", style: "margin-top:16px;",
-                            if tab == "employees" {
+                            if d.is_personal_view {
+                                if my_rows.is_empty() {
+                                    div { class: "empty-state",
+                                        div { class: "empty-icon", "📈" }
+                                        p { class: "empty-text", "Пока нет ваших завершённых замеров" }
+                                    }
+                                } else {
+                                    div { class: "card", style: "padding:4px 0;",
+                                        for row in my_rows.iter() {
+                                            {
+                                                let filler = row.filled_by_employee_name.clone().unwrap_or_else(|| "—".to_string());
+                                                let date = if row.created_at.len() >= 10 { row.created_at[..10].to_string() } else { row.created_at.clone() };
+                                                let score_text = row.score_percentage.map(|s| format!("{s:.1}%")).unwrap_or_else(|| "Черновик".to_string());
+                                                let clr = row.score_percentage.map(score_color).unwrap_or("var(--text3)");
+                                                rsx! {
+                                                    div { class: "list-row", style: "padding:12px 16px;",
+                                                        div { class: "av av-sm {av_color(&filler)}", "{initials(&filler)}" }
+                                                        div { style: "flex:1; min-width:0;",
+                                                            div { class: "rank-name", "Кто заполнил: {filler}" }
+                                                            div { class: "caption-text", "Дата: {date}" }
+                                                        }
+                                                        span { style: "font-size:14px; font-weight:600; color:{clr};", "{score_text}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !d.is_personal_view && tab == "employees" {
                                 if top.is_empty() {
                                     div { class: "empty-state",
                                         div { class: "empty-icon", "📈" }
@@ -113,7 +145,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                                         div { class: "av av-sm {av_cls}", "{init}" }
                                                         div { style: "flex:1; min-width:0;",
                                                             div { class: "rank-name", "{name}" }
-                                                            div { class: "caption-text", "{count} оценок" }
+                                                            div { class: "caption-text", "{count} замеров" }
                                                             div { class: "prog-track", style: "margin-top:5px;",
                                                                 div { class: "prog-fill", style: "width:{pct:.0}%; background:{clr};" }
                                                             }
@@ -129,7 +161,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                 }
                             }
 
-                            if tab == "criteria" {
+                            if !d.is_personal_view && tab == "criteria" {
                                 if crit.is_empty() {
                                     div { class: "empty-state",
                                         div { class: "empty-icon", "📋" }
@@ -139,7 +171,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                     div { class: "card", style: "padding:4px 0;",
                                         for stat in crit.iter() {
                                             {
-                                                let pct = stat.pass_rate * 100.0;
+                                                let pct = stat.pass_rate;
                                                 let clr = score_color(pct);
                                                 let name = stat.criterion_name.clone();
                                                 rsx! {

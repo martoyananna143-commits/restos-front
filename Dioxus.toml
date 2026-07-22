@@ -2,15 +2,15 @@
 name = "resty_form_alpha"
 
 [web.app]
-title = "Форма оценки"
+title = "Restos"
 
 [web.resource]
 style = []
-script = ["https://telegram.org/js/telegram-web-app.js"]
+script = []
 
 [web.watcher]
 reload_html = true
-watch_path = ["src", "assets"]
+watch_path = ["src", "assets", "public"]
 
 [web.resource.dev]
 script = []

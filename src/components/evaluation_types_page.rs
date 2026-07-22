@@ -82,7 +82,7 @@ fn EvaluationTypesList(
     on_edit: EventHandler<EvaluationTypeOption>,
 ) -> Element {
     match types {
-        None => rsx! { LoadingView { message: "Загрузка типов оценок...".to_string() } },
+        None => rsx! { LoadingView { message: "Загрузка типов замеров...".to_string() } },
         Some(Err(e)) => rsx! { ErrorView { message: e } },
         Some(Ok(types)) => {
             let evaluations = match evaluations {
@@ -94,8 +94,8 @@ fn EvaluationTypesList(
                 div { class: "app-screen",
                     div { class: "screen-scroll",
                         ConfigPageHeader {
-                            eyebrow: "Настройки оценок".to_string(),
-                            title: "Типы оценок".to_string(),
+                            eyebrow: "Настройки замеров".to_string(),
+                            title: "Типы замеров".to_string(),
                             action_label: Some("+"),
                             on_back,
                             on_action: Some(on_create),
@@ -103,7 +103,7 @@ fn EvaluationTypesList(
 
                         div { class: "pad", style: "margin-top: 12px;",
                             p { class: "config-page-intro",
-                                "Типы оценок задают контекст проведения оценки и помогают структурировать сценарии."
+                                "Типы замеров задают контекст проведения замера и помогают структурировать сценарии."
                             }
                         }
 
@@ -111,9 +111,9 @@ fn EvaluationTypesList(
                             if types.is_empty() {
                                 div { class: "empty-state",
                                     div { class: "empty-icon", "🏷" }
-                                    p { class: "empty-text", "Нет типов оценок" }
+                                    p { class: "empty-text", "Нет типов замеров" }
                                     p { class: "caption-text", style: "text-align:center; max-width:220px;",
-                                        "Создайте типы вроде ежемесячной, квартальной или итоговой оценки."
+                                        "Создайте типы вроде ежемесячного, квартального или итогового замера."
                                     }
                                 }
                             } else {
@@ -180,7 +180,7 @@ fn EvaluationTypeCard(
                     }
                     div { class: "type-card-badges",
                         span { class: "{badge_class}", "{code}" }
-                        span { class: "badge badge-muted", "{eval_count} оценок" }
+                        span { class: "badge badge-muted", "{eval_count} замеров" }
                     }
                 }
             }
@@ -216,8 +216,8 @@ fn EvaluationTypeForm(
         div { class: "app-screen",
             div { class: "screen-scroll",
                 ConfigPageHeader {
-                    eyebrow: "Типы оценок".to_string(),
-                    title: if is_edit { "Редактирование".to_string() } else { "Новый тип оценки".to_string() },
+                    eyebrow: "Типы замеров".to_string(),
+                    title: if is_edit { "Редактирование".to_string() } else { "Новый тип замера".to_string() },
                     on_back,
                     action_label: None,
                     on_action: None,
@@ -236,7 +236,7 @@ fn EvaluationTypeForm(
                             input {
                                 class: "field-input",
                                 r#type: "text",
-                                placeholder: "Ежемесячная оценка",
+                                placeholder: "Ежемесячный замер",
                                 value: "{name()}",
                                 oninput: move |e| {
                                     let value = e.value();

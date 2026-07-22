@@ -119,7 +119,7 @@ fn CriteriaList(
                 div { class: "app-screen",
                     div { class: "screen-scroll",
                         ConfigPageHeader {
-                            eyebrow: "Настройки оценок".to_string(),
+                            eyebrow: "Настройки замеров".to_string(),
                             title: "Критерии".to_string(),
                             action_label: Some("+"),
                             on_back,
@@ -174,7 +174,7 @@ fn CriteriaList(
                                     }
                                     p { class: "caption-text", style: "text-align:center; max-width:220px;",
                                         if criteria.is_empty() {
-                                            "Создайте критерий, чтобы затем использовать его в наборах и оценках"
+                                            "Создайте критерий, чтобы затем использовать его в наборах и замерах"
                                         } else {
                                             "Попробуйте изменить строку поиска или сбросить фильтр"
                                         }

@@ -2,8 +2,9 @@
 
 use gloo_storage::{LocalStorage, Storage};
 use serde::{Deserialize, Serialize};
+use crate::types::OrgInfo;
 
-const STORAGE_KEY: &str = "yarbot_auth";
+const STORAGE_KEY: &str = "restos_auth";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AuthState {
@@ -12,6 +13,10 @@ pub struct AuthState {
     pub org_id: i64,
     pub name: String,
     pub is_admin: bool,
+    #[serde(default)]
+    pub is_superuser: bool,
+    #[serde(default)]
+    pub available_orgs: Vec<OrgInfo>,
 }
 
 impl AuthState {

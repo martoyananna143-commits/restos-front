@@ -14,6 +14,12 @@ enum View {
     Create,
     Edit { set: CriterionSetOption },
     UploadExcel,
+    AddGoogleSheet,
+    AddGoogleFolder,
+}
+
+fn is_google_source(set: &CriterionSetOption) -> bool {
+    set.source_type == "google_sheet" || set.source_type == "google_drive_folder"
 }
 
 fn criterion_meta(value_type: &str) -> (&'static str, &'static str) {
@@ -26,7 +32,7 @@ fn criterion_meta(value_type: &str) -> (&'static str, &'static str) {
 }
 
 #[component]
-pub fn CriterionSetsPage(token: String, on_back: EventHandler<()>) -> Element {
+pub fn CriterionSetsPage(token: String, on_back: EventHandler<()>, on_open_ai: EventHandler<()>) -> Element {
     let mut view = use_signal(|| View::List);
     let t = token.clone();
     let mut sets_data = use_resource(move || {
@@ -42,12 +48,20 @@ pub fn CriterionSetsPage(token: String, on_back: EventHandler<()>) -> Element {
     match view() {
         View::List => rsx! {
             CriterionSetsList {
+                token: token.clone(),
                 sets: sets_data(),
                 criteria: criteria_data(),
                 on_back,
                 on_create: move |_| view.set(View::Create),
                 on_edit: move |set: CriterionSetOption| view.set(View::Edit { set }),
                 on_upload: move |_| view.set(View::UploadExcel),
+                on_google_sheet: move |_| view.set(View::AddGoogleSheet),
+                on_google_folder: move |_| view.set(View::AddGoogleFolder),
+                on_open_ai,
+                on_synced: move |_| {
+                    sets_data.restart();
+                    criteria_data.restart();
+                },
             }
         },
         View::Create => rsx! {
@@ -86,17 +100,44 @@ pub fn CriterionSetsPage(token: String, on_back: EventHandler<()>) -> Element {
                 },
             }
         },
+        View::AddGoogleSheet => rsx! {
+            GoogleSheetView {
+                token,
+                on_back: move |_| view.set(View::List),
+                on_done: move |_| {
+                    sets_data.restart();
+                    criteria_data.restart();
+                    view.set(View::List);
+                },
+            }
+        },
+        View::AddGoogleFolder => rsx! {
+            GoogleFolderView {
+                token,
+                on_back: move |_| view.set(View::List),
+                on_done: move |_| {
+                    sets_data.restart();
+                    criteria_data.restart();
+                    view.set(View::List);
+                },
+            }
+        },
     }
 }
 
 #[component]
 fn CriterionSetsList(
+    token: String,
     sets: Option<Result<Vec<CriterionSetOption>, String>>,
     criteria: Option<Result<Vec<Criterion>, String>>,
     on_back: EventHandler<()>,
     on_create: EventHandler<()>,
     on_edit: EventHandler<CriterionSetOption>,
     on_upload: EventHandler<()>,
+    on_google_sheet: EventHandler<()>,
+    on_google_folder: EventHandler<()>,
+    on_open_ai: EventHandler<()>,
+    on_synced: EventHandler<()>,
 ) -> Element {
     match sets {
         None => rsx! { LoadingView { message: "Загрузка наборов...".to_string() } },
@@ -114,7 +155,7 @@ fn CriterionSetsList(
                 div { class: "app-screen",
                     div { class: "screen-scroll",
                         ConfigPageHeader {
-                            eyebrow: "Настройки оценок".to_string(),
+                            eyebrow: "Настройки замеров".to_string(),
                             title: "Наборы критериев".to_string(),
                             action_label: Some("+"),
                             on_back,
@@ -125,7 +166,7 @@ fn CriterionSetsList(
                             div { class: "card info-callout-card",
                                 span { class: "info-callout-icon", "💡" }
                                 p { class: "info-callout-text",
-                                    "Набор по умолчанию подставляется автоматически при создании новой оценки."
+                                    "Набор по умолчанию подставляется автоматически при создании нового замера."
                                 }
                             }
                         }
@@ -142,11 +183,46 @@ fn CriterionSetsList(
                             } else {
                                 for set in sets {
                                     CriterionSetCard {
+                                        token: token.clone(),
                                         set,
                                         criteria_lookup: criteria_lookup.clone(),
                                         on_edit,
+                                        on_synced,
                                     }
                                 }
+                            }
+                        }
+
+                        div { class: "pad", style: "margin-top: 4px;",
+                            div { class: "config-entry-card", onclick: move |_| on_open_ai.call(()),
+                                div { class: "config-icon icon-amber", "🤖" }
+                                div { class: "config-entry-content",
+                                    div { class: "config-entry-title", "Создать набор через AI" }
+                                    div { class: "config-entry-subtitle", "Откройте чат и сгенерируйте критерии автоматически" }
+                                }
+                                span { class: "config-entry-chevron", "›" }
+                            }
+                        }
+
+                        div { class: "pad", style: "margin-top: 4px;",
+                            div { class: "config-entry-card", onclick: move |_| on_google_sheet.call(()),
+                                div { class: "config-icon icon-green", "📊" }
+                                div { class: "config-entry-content",
+                                    div { class: "config-entry-title", "Добавить замер из Google Таблицы" }
+                                    div { class: "config-entry-subtitle", "Ссылка на таблицу: Блок | Критерий | Тип" }
+                                }
+                                span { class: "config-entry-chevron", "›" }
+                            }
+                        }
+
+                        div { class: "pad", style: "margin-top: 4px;",
+                            div { class: "config-entry-card", onclick: move |_| on_google_folder.call(()),
+                                div { class: "config-icon icon-green", "📁" }
+                                div { class: "config-entry-content",
+                                    div { class: "config-entry-title", "Замеры из папки Google Drive" }
+                                    div { class: "config-entry-subtitle", "Выберите таблицу из расшаренной папки" }
+                                }
+                                span { class: "config-entry-chevron", "›" }
                             }
                         }
 
@@ -171,9 +247,11 @@ fn CriterionSetsList(
 
 #[component]
 fn CriterionSetCard(
+    token: String,
     set: CriterionSetOption,
     criteria_lookup: std::collections::HashMap<i64, Criterion>,
     on_edit: EventHandler<CriterionSetOption>,
+    on_synced: EventHandler<()>,
 ) -> Element {
     let criterion_ids = set.criterion_ids.clone().unwrap_or_default();
     let criterion_items: Vec<Criterion> = criterion_ids
@@ -183,6 +261,11 @@ fn CriterionSetCard(
 
     let edit_top = set.clone();
     let edit_bottom = set.clone();
+    let google = is_google_source(&set);
+    let mut syncing = use_signal(|| false);
+    let mut sync_msg = use_signal(|| Option::<String>::None);
+    let set_id = set.id;
+
     rsx! {
         div { class: if set.is_default { "set-card set-card-default" } else { "set-card" },
             div { class: "set-card-top",
@@ -193,9 +276,15 @@ fn CriterionSetCard(
                         if set.is_default {
                             span { class: "badge badge-amber", "По умолч." }
                         }
+                        if google {
+                            span { class: "badge badge-green", "Google" }
+                        }
                     }
                     div { class: "config-entry-subtitle",
                         "{criterion_items.len()} критериев"
+                        if google {
+                            " · обновляется из таблицы"
+                        }
                     }
                 }
                 button { class: "icon-btn btn-icon-sm", onclick: move |_| on_edit.call(edit_top.clone()), "···" }
@@ -218,7 +307,30 @@ fn CriterionSetCard(
             }
 
             div { class: "set-card-actions",
+                if google {
+                    button {
+                        class: "btn-ghost btn-outline-soft",
+                        disabled: syncing(),
+                        onclick: move |_| {
+                            let tok = token.clone();
+                            syncing.set(true);
+                            spawn(async move {
+                                match api::sync_google_criterion_set(&tok, set_id).await {
+                                    Ok(_) => {
+                                        on_synced.call(());
+                                    }
+                                    Err(e) => sync_msg.set(Some(e)),
+                                }
+                                syncing.set(false);
+                            });
+                        },
+                        if syncing() { "Обновление..." } else { "↻ Обновить из Google" }
+                    }
+                }
                 button { class: "btn-ghost btn-outline-soft", onclick: move |_| on_edit.call(edit_bottom.clone()), "Редактировать" }
+            }
+            if let Some(msg) = sync_msg() {
+                div { class: "error-msg", style: "margin-top:8px; font-size:12px;", "{msg}" }
             }
         }
     }
@@ -419,6 +531,292 @@ fn CriterionSelectorRow(
                 }
             }
             span { class: "{badge_class}", "{label}" }
+        }
+    }
+}
+
+#[component]
+fn GoogleSheetView(token: String, on_back: EventHandler<()>, on_done: EventHandler<()>) -> Element {
+    let mut name = use_signal(String::new);
+    let mut url = use_signal(String::new);
+    let mut preview = use_signal(|| None::<crate::types::GoogleSheetPreviewResponse>);
+    let mut loading = use_signal(|| false);
+    let mut saving = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        div { class: "app-screen",
+            div { class: "screen-scroll",
+                ConfigPageHeader {
+                    eyebrow: "Наборы критериев".to_string(),
+                    title: "Google Таблица".to_string(),
+                    on_back,
+                    action_label: None,
+                    on_action: None,
+                }
+
+                div { class: "pad", style: "margin-top: 12px;",
+                    div { class: "card config-form-card",
+                        div { class: "section-overline", "Формат таблицы" }
+                        p { class: "body-text", "3 столбца: Блок | Критерий | Тип (да/нет или бальная система)" }
+                        p { class: "caption-text", style: "margin-top:8px;",
+                            "Таблица должна быть доступна по ссылке (просмотр). Изменения в таблице подхватываются при каждом старте замера."
+                        }
+                    }
+
+                    if let Some(err) = error() {
+                        div { class: "error-card", style: "margin-top:12px;",
+                            p { class: "error-text", "{err}" }
+                        }
+                    }
+
+                    div { class: "card config-form-card", style: "margin-top:12px;",
+                        div { class: "form-field", style: "margin-bottom: 14px;",
+                            label { class: "field-label", "Название замера" }
+                            input {
+                                class: "field-input",
+                                placeholder: "Например: Аттестация официантов",
+                                value: "{name()}",
+                                oninput: move |e| name.set(e.value()),
+                            }
+                        }
+                        div { class: "form-field", style: "margin-bottom: 14px;",
+                            label { class: "field-label", "Ссылка на Google Таблицу" }
+                            input {
+                                class: "field-input",
+                                r#type: "url",
+                                placeholder: "https://docs.google.com/spreadsheets/d/...",
+                                value: "{url()}",
+                                oninput: move |e| url.set(e.value()),
+                            }
+                        }
+                        button {
+                            class: "btn-secondary w-full",
+                            disabled: loading() || url().trim().is_empty(),
+                            onclick: move |_| {
+                                error.set(None);
+                                preview.set(None);
+                                let tok = token.clone();
+                                let u = url().trim().to_string();
+                                loading.set(true);
+                                spawn(async move {
+                                    match api::preview_google_criterion_set(&tok, &u).await {
+                                        Ok(p) => preview.set(Some(p)),
+                                        Err(e) => error.set(Some(e)),
+                                    }
+                                    loading.set(false);
+                                });
+                            },
+                            if loading() { "Проверка..." } else { "Проверить таблицу" }
+                        }
+                    }
+
+                    if let Some(p) = preview() {
+                        div { class: "card", style: "margin-top:12px;",
+                            div { class: "heading-md", style: "margin-bottom:8px;",
+                                "Найдено: {p.rows_count} критериев"
+                            }
+                            if !p.blocks.is_empty() {
+                                div { class: "caption-text", style: "margin-bottom:10px;",
+                                    "Блоки: {p.blocks.join(\", \")}"
+                                }
+                            }
+                            for row in p.sample_rows.iter().take(8) {
+                                div { style: "font-size:13px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.06);",
+                                    span { style: "color:var(--text3);", "[{row.block}] " }
+                                    "{row.criterion} "
+                                    span { class: "badge badge-muted", "{row.value_type}" }
+                                }
+                            }
+                        }
+                        {
+                            let tok_save = token.clone();
+                            rsx! {
+                                button {
+                                    class: "btn-primary w-full",
+                                    style: "margin-top:16px;",
+                                    disabled: saving() || name().trim().is_empty(),
+                                    onclick: move |_| {
+                                        error.set(None);
+                                        let tok = tok_save.clone();
+                                        let n = name().trim().to_string();
+                                        let u = url().trim().to_string();
+                                        saving.set(true);
+                                        spawn(async move {
+                                            match api::create_google_criterion_set(&tok, &n, &u).await {
+                                                Ok(_) => on_done.call(()),
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                            saving.set(false);
+                                        });
+                                    },
+                                    if saving() { "Сохранение..." } else { "Сохранить замер" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum FolderStep {
+    EnterUrl,
+    PickFile,
+}
+
+#[component]
+fn GoogleFolderView(token: String, on_back: EventHandler<()>, on_done: EventHandler<()>) -> Element {
+    let mut step = use_signal(|| FolderStep::EnterUrl);
+    let mut folder_url = use_signal(String::new);
+    let mut files = use_signal(|| Vec::<crate::types::GoogleDriveFileItem>::new());
+    let mut selected_file = use_signal(|| Option::<crate::types::GoogleDriveFileItem>::None);
+    let mut name = use_signal(String::new);
+    let mut loading = use_signal(|| false);
+    let mut saving = use_signal(|| false);
+    let mut error = use_signal(|| Option::<String>::None);
+
+    rsx! {
+        div { class: "app-screen",
+            div { class: "screen-scroll",
+                ConfigPageHeader {
+                    eyebrow: "Наборы критериев".to_string(),
+                    title: "Папка Google Drive".to_string(),
+                    on_back,
+                    action_label: None,
+                    on_action: None,
+                }
+
+                div { class: "pad", style: "margin-top: 12px;",
+                    div { class: "card config-form-card",
+                        p { class: "body-text", "Укажите ссылку на папку с таблицами. Папка должна быть расшарена на сервисный аккаунт (см. настройки сервера)." }
+                    }
+
+                    if let Some(err) = error() {
+                        div { class: "error-card", style: "margin-top:12px;",
+                            p { class: "error-text", "{err}" }
+                        }
+                    }
+
+                    match step() {
+                        FolderStep::EnterUrl => rsx! {
+                            div { class: "card config-form-card", style: "margin-top:12px;",
+                                div { class: "form-field",
+                                    label { class: "field-label", "Ссылка на папку Google Drive" }
+                                    input {
+                                        class: "field-input",
+                                        r#type: "url",
+                                        placeholder: "https://drive.google.com/drive/folders/...",
+                                        value: "{folder_url()}",
+                                        oninput: move |e| folder_url.set(e.value()),
+                                    }
+                                }
+                                button {
+                                    class: "btn-primary w-full",
+                                    style: "margin-top:12px;",
+                                    disabled: loading() || folder_url().trim().is_empty(),
+                                    onclick: move |_| {
+                                        error.set(None);
+                                        let tok = token.clone();
+                                        let u = folder_url().trim().to_string();
+                                        loading.set(true);
+                                        spawn(async move {
+                                            match api::browse_google_drive_folder(&tok, &u).await {
+                                                Ok(resp) => {
+                                                    files.set(resp.files);
+                                                    step.set(FolderStep::PickFile);
+                                                }
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                            loading.set(false);
+                                        });
+                                    },
+                                    if loading() { "Загрузка..." } else { "Показать таблицы в папке" }
+                                }
+                            }
+                        },
+                        FolderStep::PickFile => rsx! {
+                            div { style: "margin-top:12px;",
+                                if files().is_empty() {
+                                    div { class: "empty-state",
+                                        p { class: "empty-text", "В папке нет Google Таблиц" }
+                                    }
+                                } else {
+                                    for file in files().iter().cloned() {
+                                        {
+                                            let f = file.clone();
+                                            let selected = selected_file()
+                                                .as_ref()
+                                                .map(|s| s.file_id == f.file_id)
+                                                .unwrap_or(false);
+                                            rsx! {
+                                                div {
+                                                    class: if selected { "card config-entry-card" } else { "card config-entry-card dashed" },
+                                                    style: "margin-bottom:8px; cursor:pointer;",
+                                                    onclick: move |_| {
+                                                        selected_file.set(Some(f.clone()));
+                                                        if name().trim().is_empty() {
+                                                            name.set(f.name.clone());
+                                                        }
+                                                    },
+                                                    div { class: "config-entry-title", "{file.name}" }
+                                                    if let Some(t) = file.modified_time.as_ref() {
+                                                        div { class: "caption-text", "{t}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if selected_file().is_some() {
+                                    div { class: "card config-form-card", style: "margin-top:12px;",
+                                        div { class: "form-field",
+                                            label { class: "field-label", "Название замера" }
+                                            input {
+                                                class: "field-input",
+                                                value: "{name()}",
+                                                oninput: move |e| name.set(e.value()),
+                                            }
+                                        }
+                                        button {
+                                            class: "btn-primary w-full",
+                                            style: "margin-top:12px;",
+                                            disabled: saving() || name().trim().is_empty(),
+                                            onclick: move |_| {
+                                                let Some(file) = selected_file() else { return };
+                                                error.set(None);
+                                                let tok = token.clone();
+                                                let folder = folder_url().trim().to_string();
+                                                let n = name().trim().to_string();
+                                                let fid = file.file_id.clone();
+                                                saving.set(true);
+                                                spawn(async move {
+                                                    match api::create_google_criterion_set_from_folder(
+                                                        &tok, &folder, &fid, &n,
+                                                    ).await {
+                                                        Ok(_) => on_done.call(()),
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                    saving.set(false);
+                                                });
+                                            },
+                                            if saving() { "Сохранение..." } else { "Сохранить замер" }
+                                        }
+                                    }
+                                }
+                                button {
+                                    class: "btn-ghost w-full",
+                                    style: "margin-top:12px;",
+                                    onclick: move |_| step.set(FolderStep::EnterUrl),
+                                    "← Другая папка"
+                                }
+                            }
+                        },
+                    }
+                }
+            }
         }
     }
 }
