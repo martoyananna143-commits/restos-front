@@ -7,15 +7,20 @@ use std::collections::HashSet;
 
 use dioxus::prelude::*;
 
+mod account_api;
+mod account_session;
 mod api;
 mod auth;
 mod clipboard_safe;
 mod components;
+mod device_identity;
 mod storage;
 mod types;
 mod user_error;
 mod retained;
 
+use account_api::AccountApiClient;
+use account_session::AccountSessionAdapter;
 use auth::AuthState;
 use components::{
     AccountPage, AiAssistantPage, AnalyticsPage, AuthPage, EmployeesPage, EvaluationForm, EvaluationsSection, HomePage,
@@ -67,8 +72,27 @@ fn mark_visited(visited: &mut HashSet<String>, current: &str) {
     visited.insert(current.to_string());
 }
 
+fn account_api_base() -> String {
+    if let Some(window) = web_sys::window() {
+        if let Ok(origin) = window.location().origin() {
+            if origin.contains(":8080") {
+                return origin.replace(":8080", ":8000");
+            }
+            return origin;
+        }
+    }
+    "http://localhost:8000".to_string()
+}
+
 #[component]
 fn App() -> Element {
+    // Stage 20B only provides the isolated Account session boundary. Automatic refresh is
+    // intentionally deferred until the Account UI owns an explicit startup policy.
+    use_context_provider(|| {
+        AccountSessionAdapter::new(
+            AccountApiClient::new(account_api_base()).expect("Account API base must be valid"),
+        )
+    });
     let mut auth = use_signal(|| AuthState::load());
 
     use_effect(move || {
