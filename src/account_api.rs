@@ -30,6 +30,10 @@ impl AccountAccessToken {
     fn expose_to_authorization_header(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn authorization_value(&self) -> &str {
+        self.expose_to_authorization_header()
+    }
 }
 
 impl fmt::Debug for AccountAccessToken {

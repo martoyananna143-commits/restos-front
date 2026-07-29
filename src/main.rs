@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 
 mod account_api;
 mod account_session;
+mod assessment_api;
 mod api;
 mod auth;
 mod clipboard_safe;
@@ -21,10 +22,11 @@ mod retained;
 
 use account_api::AccountApiClient;
 use account_session::AccountSessionAdapter;
+use assessment_api::AssessmentApiClient;
 use auth::AuthState;
 use components::{
-    AccountPage, AiAssistantPage, AnalyticsPage, AuthPage, EmployeesPage, EvaluationForm, EvaluationsSection, HomePage,
-    InternshipsPage, PinStepUpScreen,
+    AccountPage, AiAssistantPage, AnalyticsPage, AssessmentsPage, AuthPage, EmployeesPage,
+    EvaluationForm, HomePage, InternshipsPage, PinStepUpScreen,
 };
 use components::nav_bar::{BrandMark, NavBar};
 use components::{ErrorView, SessionGateSkeleton};
@@ -92,6 +94,10 @@ fn App() -> Element {
         AccountSessionAdapter::new(
             AccountApiClient::new(account_api_base()).expect("Account API base must be valid"),
         )
+    });
+    use_context_provider(|| {
+        AssessmentApiClient::new(account_api_base())
+            .expect("Assessment API base must be valid")
     });
     let mut auth = use_signal(|| AuthState::load());
 
@@ -316,17 +322,7 @@ fn MainShell(
                 }
                 if can_use_evaluations && is_tab_visible("evaluations", &current, &vis) {
                     div { class: "{layer_class(\"evaluations\", &current)}", style: "{layer_style(\"evaluations\", &current)}",
-                        EvaluationsSection {
-                            token: token.clone(),
-                            on_start_eval: move |eval_id: i64| {
-                                active_eval_id.set(if eval_id > 0 {
-                                    Some(eval_id)
-                                } else {
-                                    None
-                                });
-                                page.set("form".to_string());
-                            },
-                        }
+                        AssessmentsPage {}
                     }
                 }
                 if is_tab_visible("analytics", &current, &vis) {

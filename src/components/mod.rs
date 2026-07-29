@@ -25,6 +25,7 @@ mod evaluation_types_page;
 mod evaluations_section;
 mod ai_assistant_page;
 mod internships_page;
+mod assessments;
 
 pub use auth_page::AuthPage;
 pub use account_page::AccountPage;
@@ -40,5 +41,6 @@ pub use criterion_sets_page::CriterionSetsPage;
 pub use evaluation_types_page::EvaluationTypesPage;
 pub use ai_assistant_page::AiAssistantPage;
 pub use internships_page::InternshipsPage;
+pub use assessments::AssessmentsPage;
 #[allow(unused_imports)]
 pub use criteria_select_page::CriteriaSelectPage;
