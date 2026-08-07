@@ -26,6 +26,7 @@ mod evaluations_section;
 mod ai_assistant_page;
 mod internships_page;
 mod assessments;
+mod assessment_attempts;
 mod account_portal;
 
 pub use auth_page::AuthPage;
@@ -43,6 +44,7 @@ pub use evaluation_types_page::EvaluationTypesPage;
 pub use ai_assistant_page::AiAssistantPage;
 pub use internships_page::InternshipsPage;
 pub use assessments::AssessmentsPage;
+pub use assessment_attempts::AssessmentAttemptsPage;
 pub use account_portal::{
     root_after_account_logout, startup_root_state, AccountAuthPage, AccountPilotShell,
     AccountRootState,

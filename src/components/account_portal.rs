@@ -14,7 +14,7 @@ use crate::{
     passkey_api::{PasskeyApiClient, PasskeySummary},
 };
 
-use super::AssessmentsPage;
+use super::{AssessmentAttemptsPage, AssessmentsPage};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountRootState {
@@ -525,6 +525,7 @@ pub fn AccountAuthPage(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccountPilotTab {
+    MyAssessments,
     Assessments,
     Security,
 }
@@ -532,7 +533,7 @@ enum AccountPilotTab {
 #[component]
 pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
     let session = use_context::<AccountSessionAdapter>();
-    let mut tab = use_signal(|| AccountPilotTab::Assessments);
+    let mut tab = use_signal(|| AccountPilotTab::MyAssessments);
     let mut logging_out = use_signal(|| false);
     let mut lifecycle_epoch = use_signal(|| 0_u64);
     use_context_provider(|| lifecycle_epoch);
@@ -542,7 +543,8 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
             header { class: "account-pilot-header",
                 strong { "RestOS" }
                 nav { aria_label: "Разделы аккаунта",
-                    button { class: if tab() == AccountPilotTab::Assessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Assessments), "Замеры" }
+                    button { class: if tab() == AccountPilotTab::MyAssessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::MyAssessments), "Мои оценки" }
+                    button { class: if tab() == AccountPilotTab::Assessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Assessments), "Шаблоны" }
                     button { class: if tab() == AccountPilotTab::Security { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Security), "Безопасность" }
                 }
                 button {
@@ -559,6 +561,7 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
             }
             main { class: "account-pilot-main",
                 match tab() {
+                    AccountPilotTab::MyAssessments => rsx! { AssessmentAttemptsPage {} },
                     AccountPilotTab::Assessments => rsx! { AssessmentsPage {} },
                     AccountPilotTab::Security => rsx! { PasskeySecurityPanel {} },
                 }
