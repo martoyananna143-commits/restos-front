@@ -67,6 +67,7 @@ pub enum AccountApiError {
     InvalidRequest,
     ConfigurationUnavailable,
     NetworkUnavailable,
+    RateLimited,
     InternalError,
     ReauthenticationRequired,
 }
@@ -119,7 +120,7 @@ pub struct SmsRequested {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SmsVerifyInput {
-    pub invitation_code: String,
+    #[serde(rename = "challenge_id")]
     pub phone_verification_challenge_id: Uuid,
     pub phone: String,
     pub code: String,
@@ -408,6 +409,7 @@ async fn parse_json<T: DeserializeOwned>(response: Response) -> Result<T, Accoun
 fn map_status(status: u16) -> AccountApiError {
     match status {
         400 | 409 | 422 => AccountApiError::InvalidRequest,
+        429 => AccountApiError::RateLimited,
         401 => AccountApiError::AuthenticationRequired,
         403 => AccountApiError::PermissionDenied,
         503 => AccountApiError::ConfigurationUnavailable,

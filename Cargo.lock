@@ -2244,6 +2244,7 @@ dependencies = [
 name = "resty_form_alpha"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dioxus",
  "gloo-net",
  "gloo-storage",
@@ -2252,6 +2253,7 @@ dependencies = [
  "qrcodegen",
  "serde",
  "serde_json",
+ "sha2",
  "urlencoding",
  "uuid",
  "wasm-bindgen",

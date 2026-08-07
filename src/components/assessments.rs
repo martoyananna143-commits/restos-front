@@ -1522,6 +1522,7 @@ fn account_error(error: AccountApiError) -> AssessmentApiError {
         AccountApiError::InvalidRequest => AssessmentApiError::InvalidRequest,
         AccountApiError::ConfigurationUnavailable => AssessmentApiError::ConfigurationUnavailable,
         AccountApiError::NetworkUnavailable => AssessmentApiError::NetworkUnavailable,
+        AccountApiError::RateLimited => AssessmentApiError::InvalidRequest,
         AccountApiError::InternalError => AssessmentApiError::InternalError,
     }
 }

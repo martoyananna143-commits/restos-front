@@ -15,6 +15,8 @@ mod auth;
 mod clipboard_safe;
 mod components;
 mod device_identity;
+mod passkey;
+mod passkey_api;
 mod storage;
 mod types;
 mod user_error;
@@ -25,12 +27,16 @@ use account_session::AccountSessionAdapter;
 use assessment_api::AssessmentApiClient;
 use auth::AuthState;
 use components::{
-    AccountPage, AiAssistantPage, AnalyticsPage, AssessmentsPage, AuthPage, EmployeesPage,
-    EvaluationForm, HomePage, InternshipsPage, PinStepUpScreen,
+    root_after_account_logout, startup_root_state, AccountAuthPage, AccountPage,
+    AccountPilotShell, AccountRootState, AiAssistantPage, AnalyticsPage, AssessmentsPage, AuthPage,
+    EmployeesPage, EvaluationForm, HomePage, InternshipsPage, PinStepUpScreen,
 };
 use components::nav_bar::{BrandMark, NavBar};
 use components::{ErrorView, SessionGateSkeleton};
 use crate::types::MeResponse;
+use device_identity::DeviceIdentityAdapter;
+use passkey::PasskeyAdapter;
+use passkey_api::PasskeyApiClient;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
@@ -88,18 +94,41 @@ fn account_api_base() -> String {
 
 #[component]
 fn App() -> Element {
-    // Stage 20B only provides the isolated Account session boundary. Automatic refresh is
-    // intentionally deferred until the Account UI owns an explicit startup policy.
+    let account_api = use_context_provider(|| {
+        AccountApiClient::new(account_api_base()).expect("Account API base must be valid")
+    });
+    let account_session = use_context_provider(|| AccountSessionAdapter::new(account_api.clone()));
+    use_context_provider(DeviceIdentityAdapter::new);
     use_context_provider(|| {
-        AccountSessionAdapter::new(
-            AccountApiClient::new(account_api_base()).expect("Account API base must be valid"),
-        )
+        PasskeyAdapter::new(account_api_base()).expect("Passkey API base must be valid")
+    });
+    use_context_provider(|| {
+        PasskeyApiClient::new(account_api_base()).expect("Passkey API base must be valid")
     });
     use_context_provider(|| {
         AssessmentApiClient::new(account_api_base())
             .expect("Assessment API base must be valid")
     });
     let mut auth = use_signal(|| AuthState::load());
+    let mut account_root = use_signal(|| AccountRootState::BootstrappingAccount);
+    let mut startup_generation = use_signal(|| 0_u64);
+    let mut show_legacy_login = use_signal(|| false);
+
+    let startup = use_resource(move || {
+        let generation = startup_generation();
+        let account_session = account_session.clone();
+        async move { (generation, account_session.refresh().await) }
+    });
+
+    use_effect(move || {
+        let Some((completed_generation, result)) = startup() else {
+            return;
+        };
+        if completed_generation != startup_generation() {
+            return;
+        }
+        account_root.set(startup_root_state(result, auth.read().is_some()));
+    });
 
     use_effect(move || {
         let script = r#"
@@ -207,25 +236,77 @@ if ('serviceWorker' in navigator) {{
                 }
             }
         } else {
-            match auth.read().clone() {
-                None => rsx! {
-                    AuthPage {
-                        on_auth: move |state: AuthState| auth.set(Some(state)),
+            match account_root() {
+                AccountRootState::BootstrappingAccount => rsx! {
+                    div { class: "account-startup", role: "status", aria_live: "polite",
+                        "Проверяем сессию..."
                     }
                 },
-                Some(_) => rsx! {
+                AccountRootState::AccountAuthenticated => rsx! {
+                    AccountPilotShell {
+                        on_logout: move |_| {
+                            account_root.set(root_after_account_logout(auth.read().is_some()));
+                        }
+                    }
+                },
+                AccountRootState::LegacyAuthenticated => rsx! {
                     MainApp {
                         auth,
                         on_logout: move |_| {
                             AuthState::clear();
                             auth.set(None);
+                            show_legacy_login.set(false);
+                            account_root.set(AccountRootState::Unauthenticated);
                         },
                         on_switch_auth: move |new_state: AuthState| {
                             new_state.save();
                             auth.set(Some(new_state));
                         },
                     }
-                }
+                },
+                AccountRootState::Unauthenticated => {
+                    if show_legacy_login() {
+                        rsx! {
+                            AuthPage {
+                                on_auth: move |state: AuthState| {
+                                    auth.set(Some(state));
+                                    account_root.set(AccountRootState::LegacyAuthenticated);
+                                },
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            AccountAuthPage {
+                                on_authenticated: move |_| account_root.set(AccountRootState::AccountAuthenticated),
+                                on_legacy_login: move |_| show_legacy_login.set(true),
+                            }
+                        }
+                    }
+                },
+                AccountRootState::SafeStartupError => rsx! {
+                    div { class: "auth-root",
+                        div { class: "auth-card account-startup-error",
+                            h1 { class: "account-auth-heading", "Не удалось проверить сессию" }
+                            p { class: "auth-subtitle", "Проверьте соединение и повторите попытку." }
+                            button {
+                                class: "btn-primary w-full", r#type: "button",
+                                onclick: move |_| {
+                                    account_root.set(AccountRootState::BootstrappingAccount);
+                                    startup_generation += 1;
+                                },
+                                "Повторить"
+                            }
+                            button {
+                                class: "btn-ghost account-auth-link", r#type: "button",
+                                onclick: move |_| {
+                                    show_legacy_login.set(true);
+                                    account_root.set(AccountRootState::Unauthenticated);
+                                },
+                                "Старый вход для существующей версии"
+                            }
+                        }
+                    }
+                },
             }
         }
     }

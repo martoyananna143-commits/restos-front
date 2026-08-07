@@ -2,8 +2,6 @@
  * Dark amber theme, mobile-first
  */
 
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap');
-
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
@@ -28,8 +26,8 @@
   --red-dim:     rgba(248,113,113,0.12);
   --blue:        #60a5fa;
   --blue-dim:    rgba(96,165,250,0.12);
-  --serif:       'Instrument Serif', Georgia, serif;
-  --sans:        'DM Sans', system-ui, sans-serif;
+  --serif:       ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  --sans:        ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --r:           16px;
   --r-sm:        10px;
   --transition:  150ms ease;
@@ -3369,4 +3367,43 @@ button:focus-visible,
     background: rgba(0,0,0,.82);
     backdrop-filter: none;
   }
+}
+
+/* ── Account pilot / passkeys ─────────────────────────── */
+.account-startup { min-height: 100dvh; display: grid; place-items: center; padding: 24px; color: var(--text2); background: var(--bg); }
+.account-auth-card { max-width: 430px; }
+.account-auth-heading { margin-top: 8px; color: var(--text); font-size: 22px; font-weight: 600; }
+.account-auth-help { color: var(--text3); font-size: 12px; line-height: 1.5; text-align: center; }
+.account-auth-link { width: 100%; min-height: 44px; }
+.account-live { min-height: 22px; color: var(--red); font-size: 13px; line-height: 1.45; }
+.account-startup-error { display: grid; gap: 16px; text-align: center; }
+.account-pilot { min-width: 0; }
+.account-pilot-header { position: sticky; top: 0; z-index: 30; min-height: 64px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 16px; padding: 10px clamp(16px,4vw,44px); border-bottom: 1px solid var(--border); background: color-mix(in srgb,var(--bg2) 94%,transparent); backdrop-filter: blur(16px); }
+.account-pilot-header nav { display: flex; justify-content: center; gap: 6px; }
+.account-pilot-header nav button { min-height: 44px; padding: 8px 16px; border: 1px solid transparent; border-radius: var(--r-sm); background: transparent; color: var(--text2); cursor: pointer; }
+.account-pilot-header nav button.active { color: var(--text); border-color: var(--border); background: var(--surface); }
+.account-pilot-main { min-width: 0; overflow-x: hidden; }
+.account-security { width: min(760px,100%); margin: 0 auto; padding: clamp(22px,5vw,48px) 16px 48px; }
+.account-security-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.account-security-heading h1 { font-size: clamp(24px,4vw,34px); }
+.account-security-heading p, .account-muted { margin-top: 6px; color: var(--text3); font-size: 13px; }
+.account-passkey-list { display: grid; gap: 10px; margin-top: 20px; }
+.account-passkey-row { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); }
+.account-passkey-row strong, .account-passkey-row small { display: block; overflow-wrap: anywhere; }
+.account-passkey-row small { margin-top: 4px; color: var(--text3); font-size: 11px; }
+.account-revoke-confirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.account-safe-error, .account-empty { margin-top: 20px; padding: 18px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); }
+.account-safe-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+
+@media (max-width: 620px) {
+  .account-pilot-header { grid-template-columns: 1fr auto; }
+  .account-pilot-header nav { grid-column: 1 / -1; grid-row: 2; }
+  .account-pilot-header nav button { flex: 1; }
+  .account-security-heading, .account-passkey-row, .account-safe-error { align-items: stretch; flex-direction: column; }
+  .account-security-heading .btn-primary, .account-passkey-row button, .account-safe-error button { width: 100%; min-height: 44px; }
+  .account-revoke-confirm { justify-content: stretch; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-pilot *, .account-auth-root * { scroll-behavior: auto; transition: none; animation: none; }
 }

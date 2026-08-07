@@ -9,6 +9,8 @@ edition = "2021"
 dioxus = { version = "0.7", features = ["web", "router"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
+sha2 = "0.10"
 gloo-net = "0.6"      # Lightweight HTTP client for WASM
 gloo-timers = "0.3"   # Timers for WASM
 gloo-storage = "0.3"  # LocalStorage for WASM
@@ -37,6 +39,12 @@ web-sys = { version = "0.3", features = [
     "Event",
     "EventTarget",
     "Navigator",
+    "CredentialsContainer",
+    "CredentialCreationOptions",
+    "CredentialRequestOptions",
+    "PublicKeyCredential",
+    "AuthenticatorAttestationResponse",
+    "AuthenticatorAssertionResponse",
     "Document",
     "Element",
     "HtmlElement",
@@ -61,4 +69,3 @@ codegen-units = 1    # Single codegen unit for better optimization
 panic = "abort"      # Smaller binary, no unwinding
 strip = true         # Strip symbols
 incremental = false
-
