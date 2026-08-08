@@ -11,6 +11,7 @@ mod account_api;
 mod account_session;
 mod assessment_api;
 mod assessment_attempt_api;
+mod assessment_management_api;
 mod api;
 mod auth;
 mod clipboard_safe;
@@ -27,6 +28,7 @@ use account_api::AccountApiClient;
 use account_session::AccountSessionAdapter;
 use assessment_api::AssessmentApiClient;
 use assessment_attempt_api::AssessmentAttemptApiClient;
+use assessment_management_api::AssessmentManagementApiClient;
 use auth::AuthState;
 use components::{
     root_after_account_logout, startup_root_state, AccountAuthPage, AccountPage,
@@ -114,6 +116,10 @@ fn App() -> Element {
     use_context_provider(|| {
         AssessmentAttemptApiClient::new(account_api_base())
             .expect("Assessment attempt API base must be valid")
+    });
+    use_context_provider(|| {
+        AssessmentManagementApiClient::new(account_api_base())
+            .expect("Assessment management API base must be valid")
     });
     let mut auth = use_signal(|| AuthState::load());
     let mut account_root = use_signal(|| AccountRootState::BootstrappingAccount);

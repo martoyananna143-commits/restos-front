@@ -9,12 +9,18 @@ use crate::{
         AccountApiClient, AccountApiError, SmsRequestInput, SmsVerifyInput, WebRegistrationInput,
     },
     account_session::{AccountSessionAdapter, AccountSessionState},
+    assessment_management_api::{
+        AssessmentManagementApiClient, AssessmentManagementApiError, ManagementEmployee,
+    },
     device_identity::DeviceIdentityAdapter,
     passkey::{PasskeyAdapter, PasskeyError},
     passkey_api::{PasskeyApiClient, PasskeySummary},
 };
 
-use super::{AssessmentAttemptsPage, AssessmentsPage};
+use super::{
+    bootstrap_owner_capability, capability_from_probe, AssessmentAttemptsPage,
+    AssessmentManagementPage, AssessmentsPage, ManagerCapability,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountRootState {
@@ -527,16 +533,92 @@ pub fn AccountAuthPage(
 enum AccountPilotTab {
     MyAssessments,
     Assessments,
+    Management,
     Security,
 }
 
 #[component]
 pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
     let session = use_context::<AccountSessionAdapter>();
+    let management_api = use_context::<AssessmentManagementApiClient>();
     let mut tab = use_signal(|| AccountPilotTab::MyAssessments);
     let mut logging_out = use_signal(|| false);
     let mut lifecycle_epoch = use_signal(|| 0_u64);
+    let mut capability_generation = use_signal(|| 0_u64);
     use_context_provider(|| lifecycle_epoch);
+
+    let probe_session = session.clone();
+    let probe_api = management_api.clone();
+    let capability_probe = use_resource(move || {
+        let generation = capability_generation();
+        let epoch = lifecycle_epoch();
+        let state = probe_session.state();
+        let api = probe_api.clone();
+        async move {
+            let AccountSessionState::Authenticated(account) = state else {
+                return (generation, epoch, None, ManagerCapability::Hidden);
+            };
+            let Some(company_id) = account.selected_company.map(|value| value.0) else {
+                return (generation, epoch, None, ManagerCapability::Hidden);
+            };
+            let relationship = account
+                .bootstrap
+                .companies
+                .iter()
+                .find(|company| company.company_id == company_id)
+                .map(|company| company.relationship.as_str());
+            if relationship == Some("owner") {
+                return (
+                    generation,
+                    epoch,
+                    Some(company_id),
+                    ManagerCapability::Authorized,
+                );
+            }
+            if relationship != Some("employee") {
+                return (
+                    generation,
+                    epoch,
+                    Some(company_id),
+                    ManagerCapability::Hidden,
+                );
+            }
+            let result: Result<Vec<ManagementEmployee>, AssessmentManagementApiError> = api
+                .employees(&account.access_token, company_id, None, 1, None)
+                .await;
+            (
+                generation,
+                epoch,
+                Some(company_id),
+                capability_from_probe(&result),
+            )
+        }
+    });
+
+    let session_state = session.state();
+    let (companies, selected_company) = match &session_state {
+        AccountSessionState::Authenticated(account) => (
+            account.bootstrap.companies.as_slice(),
+            account.selected_company.map(|value| value.0),
+        ),
+        _ => (&[][..], None),
+    };
+    let owner_capability = bootstrap_owner_capability(companies, selected_company);
+    let manager_capability = if owner_capability == ManagerCapability::Authorized {
+        ManagerCapability::Authorized
+    } else {
+        capability_probe()
+            .and_then(|(generation, epoch, company_id, capability)| {
+                (generation == capability_generation()
+                    && epoch == lifecycle_epoch()
+                    && company_id == selected_company)
+                    .then_some(capability)
+            })
+            .unwrap_or(ManagerCapability::Checking)
+    };
+    if tab() == AccountPilotTab::Management && manager_capability != ManagerCapability::Authorized {
+        tab.set(AccountPilotTab::MyAssessments);
+    }
 
     rsx! {
         div { class: "account-pilot app-root",
@@ -545,7 +627,17 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                 nav { aria_label: "Разделы аккаунта",
                     button { class: if tab() == AccountPilotTab::MyAssessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::MyAssessments), "Мои оценки" }
                     button { class: if tab() == AccountPilotTab::Assessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Assessments), "Шаблоны" }
+                    if manager_capability == ManagerCapability::Authorized {
+                        button { class: if tab() == AccountPilotTab::Management { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Management), "Назначения" }
+                    }
                     button { class: if tab() == AccountPilotTab::Security { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Security), "Безопасность" }
+                }
+                if manager_capability == ManagerCapability::Error {
+                    button {
+                        class: "btn-secondary", r#type: "button",
+                        onclick: move |_| capability_generation += 1,
+                        "Повторить проверку доступа"
+                    }
                 }
                 button {
                     class: "btn-ghost", r#type: "button", disabled: logging_out(),
@@ -563,6 +655,14 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                 match tab() {
                     AccountPilotTab::MyAssessments => rsx! { AssessmentAttemptsPage {} },
                     AccountPilotTab::Assessments => rsx! { AssessmentsPage {} },
+                    AccountPilotTab::Management => rsx! {
+                        AssessmentManagementPage {
+                            on_company_changed: move |_| {
+                                tab.set(AccountPilotTab::MyAssessments);
+                                capability_generation += 1;
+                            }
+                        }
+                    },
                     AccountPilotTab::Security => rsx! { PasskeySecurityPanel {} },
                 }
             }

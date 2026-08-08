@@ -215,6 +215,36 @@ enum SubmitPreparation {
     Blocked,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssignmentAction {
+    Start,
+    Continue,
+}
+
+impl AssignmentAction {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Начать",
+            Self::Continue => "Продолжить",
+        }
+    }
+}
+
+fn assignment_action(status: &str, read_only: bool) -> Option<AssignmentAction> {
+    if read_only {
+        return None;
+    }
+    match status {
+        "assigned" => Some(AssignmentAction::Start),
+        "in_progress" => Some(AssignmentAction::Continue),
+        _ => None,
+    }
+}
+
+fn attempt_action_is_admitted(action: Option<AssignmentAction>, opening: bool) -> bool {
+    action.is_some() && !opening
+}
+
 fn submit_preparation(status: SaveStatus, read_only: bool, submitting: bool) -> SubmitPreparation {
     if read_only
         || submitting
@@ -471,15 +501,17 @@ pub fn AssessmentAttemptsPage() -> Element {
             else if assignments().is_empty() { div { class: "account-empty", p { "Назначенных оценок пока нет." } } }
             else { div { class: "attempt-assignment-list",
                 for item in assignments() {
-                    { let id = item.id; let session = session.clone(); let api = api.clone();
+                    { let id = item.id; let action = assignment_action(&item.status, item.read_only); let session = session.clone(); let api = api.clone();
                     rsx! { article { key: "{id}", class: "attempt-assignment-card",
                         div { h2 { "{item.template_name}" } p { "{assignment_status(&item.status, item.read_only)}" } small { "Назначено: {item.assigned_at}" } if let Some(due) = item.due_at.as_ref() { small { "Срок: {due}" } } }
-                        button { class: "btn-primary", r#type: "button", disabled: opening().is_some(), onclick: move |_| {
-                            if opening().is_some() { return; }
-                            let token = match session.state() { AccountSessionState::Authenticated(value) => value.access_token, _ => { error.set(Some("Сессия недоступна. Войдите снова.".into())); return; } };
-                            opening.set(Some(id)); attempt_generation += 1; let generation = attempt_generation(); let operation_epoch = lifecycle_epoch(); let operation_company_generation = company_generation(); let api = api.clone();
-                            spawn(async move { let result = api.create_or_resume(&token, id).await; if attempt_generation() != generation || lifecycle_epoch() != operation_epoch || company_generation() != operation_company_generation { return; } opening.set(None); match result { Ok(value) => { draft.set(Some(DraftState::from_attempt(&value))); attempt.set(Some(value)); current_section.set(0); }, Err(problem) => error.set(Some(safe_error(&problem).into())) } });
-                        }, if opening() == Some(id) { "Открытие..." } else if item.status == "completed" { "Посмотреть результат" } else if item.status == "in_progress" { "Продолжить" } else { "Начать" } }
+                        if let Some(action) = action {
+                            button { class: "btn-primary", r#type: "button", disabled: opening().is_some(), onclick: move |_| {
+                                if !attempt_action_is_admitted(Some(action), opening().is_some()) { return; }
+                                let token = match session.state() { AccountSessionState::Authenticated(value) => value.access_token, _ => { error.set(Some("Сессия недоступна. Войдите снова.".into())); return; } };
+                                opening.set(Some(id)); attempt_generation += 1; let generation = attempt_generation(); let operation_epoch = lifecycle_epoch(); let operation_company_generation = company_generation(); let api = api.clone();
+                                spawn(async move { let result = api.create_or_resume(&token, id).await; if attempt_generation() != generation || lifecycle_epoch() != operation_epoch || company_generation() != operation_company_generation { return; } opening.set(None); match result { Ok(value) => { draft.set(Some(DraftState::from_attempt(&value))); attempt.set(Some(value)); current_section.set(0); }, Err(problem) => error.set(Some(safe_error(&problem).into())) } });
+                            }, if opening() == Some(id) { "Открытие..." } else { "{action.label()}" } }
+                        }
                     } } }
                 }
             } }
@@ -1066,6 +1098,64 @@ mod tests {
             company
         ));
         assert!(!operation_is_current(4, 4, None, company));
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_assigned_read_write_exposes_start_action() {
+        assert_eq!(
+            assignment_action("assigned", false),
+            Some(AssignmentAction::Start)
+        );
+        assert_eq!(AssignmentAction::Start.label(), "Начать");
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_in_progress_read_write_exposes_continue_action() {
+        assert_eq!(
+            assignment_action("in_progress", false),
+            Some(AssignmentAction::Continue)
+        );
+        assert_eq!(AssignmentAction::Continue.label(), "Продолжить");
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_completed_summary_fails_closed_without_attempt_identifier() {
+        assert_eq!(assignment_action("completed", true), None);
+        assert_eq!(assignment_action("completed", false), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_revoked_read_only_has_no_attempt_action() {
+        assert_eq!(assignment_action("revoked", true), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_expired_read_only_has_no_attempt_action() {
+        assert_eq!(assignment_action("assigned", true), None);
+        assert_eq!(assignment_action("in_progress", true), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_unknown_status_fails_closed() {
+        assert_eq!(assignment_action("unknown", false), None);
+        assert_eq!(assignment_action("", false), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn stage23e_read_only_and_missing_action_block_attempt_admission() {
+        assert!(!attempt_action_is_admitted(
+            assignment_action("revoked", true),
+            false
+        ));
+        assert!(!attempt_action_is_admitted(None, false));
+        assert!(!attempt_action_is_admitted(
+            Some(AssignmentAction::Start),
+            true
+        ));
+        assert!(attempt_action_is_admitted(
+            Some(AssignmentAction::Start),
+            false
+        ));
     }
 
     #[wasm_bindgen_test]
