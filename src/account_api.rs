@@ -11,7 +11,8 @@ use gloo_net::http::{Request, Response};
 use web_sys::RequestCredentials;
 
 use crate::device_identity::{
-    canonical_device_proof_message, CanonicalDeviceProof, DeviceIdentityAdapter,
+    canonical_account_registration_device_proof_message, canonical_device_proof_message,
+    CanonicalAccountRegistrationDeviceProof, CanonicalDeviceProof, DeviceIdentityAdapter,
 };
 
 const WEB_SESSION_HEADER: &str = "X-RestOS-Web-Session";
@@ -127,6 +128,91 @@ pub struct SmsVerifyInput {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct StandaloneSmsRequestInput {
+    pub phone: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StandaloneSmsVerifyInput {
+    pub challenge_id: Uuid,
+    pub phone: String,
+    pub code: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct StandaloneRegistrationInput {
+    pub phone_verification_challenge_id: Uuid,
+    pub phone: String,
+    pub display_name: String,
+    pub password: String,
+    pub platform: String,
+    pub device_display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PasswordLoginInput {
+    pub phone: String,
+    pub password: String,
+    pub platform: String,
+    pub device_display_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PasswordResetCompleteInput {
+    pub challenge_id: Uuid,
+    pub phone: String,
+    pub new_password: String,
+}
+
+#[derive(Serialize)]
+struct AccountDeviceChallengeRequest<'a> {
+    phone_verification_challenge_id: Uuid,
+    phone: &'a str,
+    app_instance_id: Uuid,
+    platform: &'a str,
+    public_key: String,
+}
+
+#[derive(Deserialize)]
+struct AccountDeviceChallengeResponse {
+    device_challenge_id: Uuid,
+    nonce: String,
+    algorithm: String,
+    protocol: String,
+}
+
+#[derive(Serialize)]
+struct StandaloneRegistrationRequest<'a> {
+    phone_verification_challenge_id: Uuid,
+    phone: &'a str,
+    display_name: &'a str,
+    password: &'a str,
+    app_instance_id: Uuid,
+    platform: &'a str,
+    device_display_name: &'a Option<String>,
+    device_challenge_id: Uuid,
+    device_challenge_nonce: &'a str,
+    device_challenge_signature: String,
+}
+
+#[derive(Serialize)]
+struct PasswordLoginRequest<'a> {
+    phone: &'a str,
+    password: &'a str,
+    app_instance_id: Uuid,
+    platform: &'a str,
+    device_display_name: &'a Option<String>,
+    public_key: String,
+}
+
+#[derive(Deserialize)]
+struct AccountAuthResponse {
+    access_token: String,
+    expires_at: String,
+    token_type: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct DeviceChallengeRequest<'a> {
     invitation_code: &'a str,
     phone_verification_challenge_id: Uuid,
@@ -198,6 +284,20 @@ pub struct AccountApiClient {
 }
 
 impl AccountApiClient {
+    #[cfg(test)]
+    pub const fn standalone_auth_routes() -> [&'static str; 8] {
+        [
+            "/api/v1/auth/account/registration/sms/request",
+            "/api/v1/auth/account/registration/sms/verify",
+            "/api/v1/auth/account/registration/device/challenge",
+            "/api/v1/auth/account/registration/complete",
+            "/api/v1/auth/account/login",
+            "/api/v1/auth/account/password-reset/sms/request",
+            "/api/v1/auth/account/password-reset/sms/verify",
+            "/api/v1/auth/account/password-reset/complete",
+        ]
+    }
+
     pub fn new(base_url: String) -> Result<Self, AccountApiError> {
         let trimmed = base_url.trim_end_matches('/').to_string();
         if trimmed.is_empty() {
@@ -363,6 +463,168 @@ impl AccountApiClient {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub async fn request_registration_sms(
+        &self,
+        input: &StandaloneSmsRequestInput,
+    ) -> Result<SmsRequested, AccountApiError> {
+        self.web_json_post("/api/v1/auth/account/registration/sms/request", input)
+            .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn verify_registration_sms(
+        &self,
+        input: &StandaloneSmsVerifyInput,
+    ) -> Result<(), AccountApiError> {
+        self.web_json_post::<_, serde_json::Value>(
+            "/api/v1/auth/account/registration/sms/verify",
+            input,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn register_standalone(
+        &self,
+        identity_adapter: &DeviceIdentityAdapter,
+        input: &StandaloneRegistrationInput,
+    ) -> Result<RegisteredAccountSession, AccountApiError> {
+        let identity = identity_adapter
+            .get_or_create()
+            .await
+            .map_err(|_| AccountApiError::InternalError)?;
+        let app_instance_id = identity.metadata().app_instance_id.as_uuid();
+        let challenge: AccountDeviceChallengeResponse = self
+            .web_json_post(
+                "/api/v1/auth/account/registration/device/challenge",
+                &AccountDeviceChallengeRequest {
+                    phone_verification_challenge_id: input.phone_verification_challenge_id,
+                    phone: &input.phone,
+                    app_instance_id,
+                    platform: &input.platform,
+                    public_key: encode_base64(identity.public_spki().as_bytes()),
+                },
+            )
+            .await?;
+        if challenge.algorithm != "ES256" || challenge.protocol != "account-registration-v1" {
+            return Err(AccountApiError::InternalError);
+        }
+        let canonical = canonical_account_registration_device_proof_message(
+            CanonicalAccountRegistrationDeviceProof {
+                device_challenge_id: &challenge.device_challenge_id.to_string(),
+                phone_challenge_id: &input.phone_verification_challenge_id.to_string(),
+                app_instance_id: identity.metadata().app_instance_id,
+                platform: &input.platform,
+                nonce_base64url: &challenge.nonce,
+            },
+        )
+        .map_err(|_| AccountApiError::InternalError)?;
+        let signature = identity
+            .sign(&canonical)
+            .await
+            .map_err(|_| AccountApiError::InternalError)?;
+        self.accept_auth_response(
+            self.web_json_post(
+                "/api/v1/auth/account/registration/complete",
+                &StandaloneRegistrationRequest {
+                    phone_verification_challenge_id: input.phone_verification_challenge_id,
+                    phone: &input.phone,
+                    display_name: &input.display_name,
+                    password: &input.password,
+                    app_instance_id,
+                    platform: &input.platform,
+                    device_display_name: &input.device_display_name,
+                    device_challenge_id: challenge.device_challenge_id,
+                    device_challenge_nonce: &challenge.nonce,
+                    device_challenge_signature: encode_base64url(signature.as_bytes()),
+                },
+            )
+            .await?,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn password_login(
+        &self,
+        identity_adapter: &DeviceIdentityAdapter,
+        input: &PasswordLoginInput,
+    ) -> Result<RegisteredAccountSession, AccountApiError> {
+        let identity = identity_adapter
+            .get_or_create()
+            .await
+            .map_err(|_| AccountApiError::InternalError)?;
+        self.accept_auth_response(
+            self.web_json_post(
+                "/api/v1/auth/account/login",
+                &PasswordLoginRequest {
+                    phone: &input.phone,
+                    password: &input.password,
+                    app_instance_id: identity.metadata().app_instance_id.as_uuid(),
+                    platform: &input.platform,
+                    device_display_name: &input.device_display_name,
+                    public_key: encode_base64(identity.public_spki().as_bytes()),
+                },
+            )
+            .await?,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn request_password_reset_sms(
+        &self,
+        input: &StandaloneSmsRequestInput,
+    ) -> Result<SmsRequested, AccountApiError> {
+        self.web_json_post("/api/v1/auth/account/password-reset/sms/request", input)
+            .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn verify_password_reset_sms(
+        &self,
+        input: &StandaloneSmsVerifyInput,
+    ) -> Result<(), AccountApiError> {
+        self.web_json_post::<_, serde_json::Value>(
+            "/api/v1/auth/account/password-reset/sms/verify",
+            input,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn complete_password_reset(
+        &self,
+        input: &PasswordResetCompleteInput,
+    ) -> Result<(), AccountApiError> {
+        self.web_json_post::<_, serde_json::Value>(
+            "/api/v1/auth/account/password-reset/complete",
+            input,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn accept_auth_response(
+        &self,
+        response: AccountAuthResponse,
+    ) -> Result<RegisteredAccountSession, AccountApiError> {
+        if response.token_type != "bearer" {
+            return Err(AccountApiError::InternalError);
+        }
+        let access_token = AccountAccessToken::from_server(response.access_token)?;
+        let bootstrap = self.bootstrap(&access_token).await?;
+        Ok(RegisteredAccountSession {
+            access_token,
+            expires_at: response.expires_at,
+            bootstrap,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
     async fn public_json_post<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -441,6 +703,13 @@ fn encode_base64(bytes: &[u8]) -> String {
     output
 }
 
+fn encode_base64url(bytes: &[u8]) -> String {
+    encode_base64(bytes)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +737,22 @@ mod tests {
         assert_eq!(encode_base64(b"f"), "Zg==");
         assert_eq!(encode_base64(b"fo"), "Zm8=");
         assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64url(&[0xfb, 0xff]), "-_8");
+        assert!(!encode_base64url(b"proof").contains('='));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn standalone_contract_has_exact_unique_routes() {
+        let routes = AccountApiClient::standalone_auth_routes();
+        assert_eq!(routes.len(), 8);
+        let unique = routes
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), routes.len());
+        assert!(routes
+            .iter()
+            .all(|route| route.starts_with("/api/v1/auth/account/")));
     }
 }

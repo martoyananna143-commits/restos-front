@@ -29,6 +29,7 @@ mod assessments;
 mod assessment_attempts;
 mod assessment_management;
 mod account_portal;
+mod standalone_account_auth;
 
 pub use auth_page::AuthPage;
 pub use account_page::AccountPage;
@@ -51,8 +52,8 @@ pub use assessment_management::{
     ManagerCapability,
 };
 pub use account_portal::{
-    root_after_account_logout, startup_root_state, AccountAuthPage, AccountPilotShell,
-    AccountRootState,
+    root_after_account_logout, startup_root_state, AccountPilotShell, AccountRootState,
 };
+pub use standalone_account_auth::AccountAuthPage;
 #[allow(unused_imports)]
 pub use criteria_select_page::CriteriaSelectPage;

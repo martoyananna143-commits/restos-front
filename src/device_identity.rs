@@ -15,6 +15,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::CryptoKey;
 
 const PROTOCOL: &[u8] = b"restos-device-registration-v1";
+const ACCOUNT_REGISTRATION_PROTOCOL: &[u8] = b"restos-device-registration-v2/account-registration";
 const DB_NAME: &str = "restos_account_device";
 const STORE_NAME: &str = "device_identity";
 const RECORD_KEY: &str = "primary";
@@ -290,6 +291,46 @@ pub fn canonical_device_proof_message(
     Ok(message)
 }
 
+pub struct CanonicalAccountRegistrationDeviceProof<'a> {
+    pub device_challenge_id: &'a str,
+    pub phone_challenge_id: &'a str,
+    pub app_instance_id: AppInstanceId,
+    pub platform: &'a str,
+    pub nonce_base64url: &'a str,
+}
+
+pub fn canonical_account_registration_device_proof_message(
+    input: CanonicalAccountRegistrationDeviceProof<'_>,
+) -> Result<Vec<u8>, DeviceIdentityError> {
+    if !input.platform.is_ascii() || input.platform.is_empty() {
+        return Err(DeviceIdentityError::InvalidPlatform);
+    }
+    let device_challenge_id =
+        Uuid::parse_str(input.device_challenge_id).map_err(|_| DeviceIdentityError::InvalidUuid)?;
+    let phone_challenge_id =
+        Uuid::parse_str(input.phone_challenge_id).map_err(|_| DeviceIdentityError::InvalidUuid)?;
+    let nonce = decode_base64url(input.nonce_base64url)?;
+    if nonce.is_empty() {
+        return Err(DeviceIdentityError::InvalidNonce);
+    }
+
+    let fields: [&[u8]; 6] = [
+        ACCOUNT_REGISTRATION_PROTOCOL,
+        device_challenge_id.as_bytes(),
+        phone_challenge_id.as_bytes(),
+        input.app_instance_id.0.as_bytes(),
+        input.platform.as_bytes(),
+        &nonce,
+    ];
+    let mut message = Vec::new();
+    for field in fields {
+        let length = u32::try_from(field.len()).map_err(|_| DeviceIdentityError::FieldTooLarge)?;
+        message.extend_from_slice(&length.to_be_bytes());
+        message.extend_from_slice(field);
+    }
+    Ok(message)
+}
+
 pub fn raw_p256_signature_to_der(raw: &[u8]) -> Result<DeviceSignatureDer, DeviceIdentityError> {
     if raw.len() != 64 {
         return Err(DeviceIdentityError::InvalidRawSignatureLength);
@@ -517,6 +558,29 @@ mod tests {
         assert_ne!(baseline, changed_nonce);
         assert!(canonical_device_proof_message(proof("iös", "AA")).is_err());
         assert!(canonical_device_proof_message(proof("ios", "A")).is_err());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn standalone_registration_has_separate_versioned_context() {
+        let standalone = canonical_account_registration_device_proof_message(
+            CanonicalAccountRegistrationDeviceProof {
+                device_challenge_id: DEVICE,
+                phone_challenge_id: PHONE,
+                app_instance_id: AppInstanceId::parse(APP).unwrap(),
+                platform: "web",
+                nonce_base64url: "AA",
+            },
+        )
+        .unwrap();
+        let invitation = canonical_device_proof_message(proof("web", "AA")).unwrap();
+        assert_ne!(standalone, invitation);
+        assert!(standalone
+            .windows(ACCOUNT_REGISTRATION_PROTOCOL.len())
+            .any(|window| window == ACCOUNT_REGISTRATION_PROTOCOL));
+        assert!(!standalone
+            .windows(INVITATION.len())
+            .any(|window| window == INVITATION.as_bytes()));
     }
 
     #[test]

@@ -167,7 +167,7 @@ impl AccountSessionAdapter {
         }
     }
 
-    fn current_token(&self) -> Result<AccountAccessToken, AccountApiError> {
+    pub(crate) fn current_token(&self) -> Result<AccountAccessToken, AccountApiError> {
         match self.state() {
             AccountSessionState::Authenticated(authenticated) => Ok(authenticated.access_token),
             _ => Err(AccountApiError::AuthenticationRequired),

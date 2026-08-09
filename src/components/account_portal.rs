@@ -209,9 +209,10 @@ pub fn safe_passkey_label(summary: &PasskeySummary) -> String {
 }
 
 #[component]
-pub fn AccountAuthPage(
+pub fn InvitationAccountAuthPage(
     on_authenticated: EventHandler<()>,
     on_legacy_login: EventHandler<()>,
+    on_standalone: EventHandler<()>,
 ) -> Element {
     let api = use_context::<AccountApiClient>();
     let session = use_context::<AccountSessionAdapter>();
@@ -310,6 +311,12 @@ pub fn AccountAuthPage(
                                 disabled: operation() != UiOperation::Idle,
                                 onclick: move |_| { error.set(None); mode.set(AccountAuthMode::Phone); },
                                 "Войти или зарегистрироваться по телефону"
+                            }
+                            button {
+                                class: "btn-ghost account-auth-link",
+                                r#type: "button",
+                                onclick: move |_| on_standalone.call(()),
+                                "Обычный вход"
                             }
                             button {
                                 class: "btn-ghost account-auth-link",
