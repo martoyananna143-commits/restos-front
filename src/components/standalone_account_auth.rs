@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     account_api::{
         AccountApiClient, AccountApiError, CreateFirstCompanyInput, PasswordLoginInput,
-        PasswordResetCompleteInput, SmsRequested, StandaloneRegistrationInput,
-        StandaloneSmsRequestInput, StandaloneSmsVerifyInput,
+        PasswordResetCompleteInput, PasswordResetSmsRequestInput, SmsRequested,
+        StandaloneRegistrationInput, StandaloneSmsRequestInput, StandaloneSmsVerifyInput,
     },
     account_session::AccountSessionAdapter,
     device_identity::DeviceIdentityAdapter,
@@ -16,7 +16,11 @@ use crate::{
 };
 
 use super::{
-    account_legal_notice::{AccountLegalContext, AccountLegalNotice},
+    account_legal_notice::{
+        password_recovery_sms_request_allowed, registration_sms_request_allowed,
+        AccountCreationLegalNotice, AccountLegalContext, AccountLegalNotice,
+        PasswordRecoverySmsLegalControl, RegistrationSmsLegalControls,
+    },
     account_portal::{safe_account_error, safe_passkey_error, InvitationAccountAuthPage},
 };
 
@@ -124,6 +128,8 @@ pub fn AccountAuthPage(
     let mut challenge: Signal<Option<Uuid>> = use_signal(|| None);
     let mut resend_ready = use_signal(|| false);
     let mut resend_generation = use_signal(|| 0_u64);
+    let mut personal_data_consent = use_signal(|| false);
+    let mut authorization_sms_consent = use_signal(|| false);
 
     let mut reset_flow = move |next: Mode| {
         generation += 1;
@@ -139,6 +145,8 @@ pub fn AccountAuthPage(
         otp.set(String::new());
         challenge.set(None);
         resend_ready.set(false);
+        personal_data_consent.set(false);
+        authorization_sms_consent.set(false);
         mode.set(next);
     };
 
@@ -239,14 +247,27 @@ pub fn AccountAuthPage(
                                 label { class: "field-label", r#for: "standalone-phone", "Номер телефона" }
                                 input { id: "standalone-phone", class: "field-input", r#type: "tel", autocomplete: "tel", value: "{phone}", oninput: move |event| phone.set(event.value()) }
                             }
-                            AccountLegalNotice { context: if is_registration { AccountLegalContext::RegistrationSms } else { AccountLegalContext::PasswordResetSms } }
-                            button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
+                            if is_registration {
+                                RegistrationSmsLegalControls { personal_data_consent, authorization_sms_consent }
+                            } else {
+                                PasswordRecoverySmsLegalControl { authorization_sms_consent }
+                            }
+                            button { class: "btn-primary w-full", r#type: "button",
+                                disabled: busy() || if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) },
                                 onclick: move |_| {
                                     if busy() || !phone_is_plausible(&phone()) { error.set(Some("Проверьте номер телефона.".into())); return; }
+                                    if if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) } { return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
-                                    let api = request_api.clone(); let request = StandaloneSmsRequestInput { phone: phone() };
+                                    let api = request_api.clone();
+                                    let request_phone = phone();
+                                    personal_data_consent.set(false);
+                                    authorization_sms_consent.set(false);
                                     spawn(async move {
-                                        let result = if is_registration { api.request_registration_sms(&request).await } else { api.request_password_reset_sms(&request).await };
+                                        let result = if is_registration {
+                                            api.request_registration_sms(&StandaloneSmsRequestInput { phone: request_phone, personal_data_consent: true, authorization_sms_consent: true }).await
+                                        } else {
+                                            api.request_password_reset_sms(&PasswordResetSmsRequestInput { phone: request_phone, authorization_sms_consent: true }).await
+                                        };
                                         if generation() != current_generation { return; }
                                         busy.set(false);
                                         match result { Ok(requested) => { challenge.set(Some(requested.challenge_id)); otp.set(String::new()); resend_ready.set(false); resend_generation += 1; arm_resend_timer(requested.resend_available_at, resend_ready, resend_generation(), resend_generation); mode.set(if is_registration { Mode::RegistrationOtp } else { Mode::ResetOtp }); }, Err(problem) => error.set(Some(safe_account_error(&problem).into())) }
@@ -281,13 +302,23 @@ pub fn AccountAuthPage(
                                 },
                                 if busy() { "Проверка..." } else { "Подтвердить код" }
                             }
-                            button { class: "btn-secondary w-full", r#type: "button", disabled: busy() || !resend_ready(),
+                            if is_registration {
+                                RegistrationSmsLegalControls { personal_data_consent, authorization_sms_consent }
+                            } else {
+                                PasswordRecoverySmsLegalControl { authorization_sms_consent }
+                            }
+                            button { class: "btn-secondary w-full", r#type: "button", disabled: busy() || !resend_ready() || if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) },
                                 onclick: move |_| {
-                                    if busy() || !resend_ready() { return; }
+                                    if busy() || !resend_ready() || if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) } { return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
-                                    let api = resend_api.clone(); let request = StandaloneSmsRequestInput { phone: phone() };
+                                    let api = resend_api.clone(); let request_phone = phone();
+                                    personal_data_consent.set(false); authorization_sms_consent.set(false);
                                     spawn(async move {
-                                        let result = if is_registration { api.request_registration_sms(&request).await } else { api.request_password_reset_sms(&request).await };
+                                        let result = if is_registration {
+                                            api.request_registration_sms(&StandaloneSmsRequestInput { phone: request_phone, personal_data_consent: true, authorization_sms_consent: true }).await
+                                        } else {
+                                            api.request_password_reset_sms(&PasswordResetSmsRequestInput { phone: request_phone, authorization_sms_consent: true }).await
+                                        };
                                         if generation() != current_generation { return; }
                                         busy.set(false);
                                         match result { Ok(SmsRequested { challenge_id, resend_available_at, .. }) => { challenge.set(Some(challenge_id)); resend_ready.set(false); resend_generation += 1; arm_resend_timer(resend_available_at, resend_ready, resend_generation(), resend_generation); }, Err(problem) => error.set(Some(safe_account_error(&problem).into())) }
@@ -301,10 +332,10 @@ pub fn AccountAuthPage(
                     Mode::RegistrationDetails => {
                         let register_api = api.clone(); let register_identities = identities.clone(); let register_session = session.clone();
                         rsx! { div { class: "auth-form",
-                            div { class: "form-field", label { class: "field-label", r#for: "standalone-name", "Имя" } input { id: "standalone-name", class: "field-input", autocomplete: "name", maxlength: "255", value: "{display_name}", oninput: move |event| display_name.set(event.value()) } }
+                            div { class: "form-field", label { class: "field-label", r#for: "standalone-name", "ФИО" } input { id: "standalone-name", class: "field-input", autocomplete: "name", maxlength: "255", value: "{display_name}", oninput: move |event| display_name.set(event.value()) } }
                             div { class: "form-field", label { class: "field-label", r#for: "standalone-new-password", "Пароль" } input { id: "standalone-new-password", class: "field-input", r#type: "password", autocomplete: "new-password", minlength: "12", maxlength: "72", value: "{password}", oninput: move |event| password.set(event.value()) } }
                             p { class: "account-auth-help", "От 12 до 72 байт. Не используйте пароль от других сервисов." }
-                            AccountLegalNotice { context: AccountLegalContext::AccountCreation }
+                            AccountCreationLegalNotice {}
                             button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
                                 onclick: move |_| {
                                     let Some(challenge_id) = challenge() else { error.set(Some("Запросите новый код.".into())); return; };

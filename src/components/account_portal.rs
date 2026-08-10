@@ -18,7 +18,10 @@ use crate::{
 };
 
 use super::{
-    account_legal_notice::{AccountLegalContext, AccountLegalNotice},
+    account_legal_notice::{
+        registration_sms_request_allowed, AccountCreationLegalNotice, AccountLegalContext,
+        AccountLegalNotice, RegistrationSmsLegalControls,
+    },
     bootstrap_owner_capability, capability_from_probe, AssessmentAttemptsPage,
     AssessmentManagementPage, AssessmentsPage, ManagerCapability, WorkforceOnboardingPage,
 };
@@ -233,6 +236,8 @@ pub fn InvitationAccountAuthPage(
     let mut resend_timer_generation = use_signal(|| 0_u64);
     let mut display_name = use_signal(String::new);
     let mut password = use_signal(String::new);
+    let mut personal_data_consent = use_signal(|| false);
+    let mut authorization_sms_consent = use_signal(|| false);
 
     let mut cancel = move || {
         generation.set(next_generation(generation()));
@@ -249,6 +254,8 @@ pub fn InvitationAccountAuthPage(
         resend_timer_generation.set(next_generation(resend_timer_generation()));
         display_name.set(String::new());
         password.set(String::new());
+        personal_data_consent.set(false);
+        authorization_sms_consent.set(false);
     };
 
     rsx! {
@@ -346,12 +353,13 @@ pub fn InvitationAccountAuthPage(
                                     oninput: move |event| phone.set(event.value()),
                                 }
                             }
-                            AccountLegalNotice { context: AccountLegalContext::InvitationRegistration }
+                            RegistrationSmsLegalControls { personal_data_consent, authorization_sms_consent }
                             button {
                                 class: "btn-primary w-full", r#type: "button",
-                                disabled: operation() != UiOperation::Idle,
+                                disabled: operation() != UiOperation::Idle || !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()),
                                 onclick: move |_| {
                                     if operation() != UiOperation::Idle { return; }
+                                    if !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) { return; }
                                     if invitation().len() != 6 || phone().len() < 8 || phone().len() > 32 {
                                         error.set(Some("Проверьте код приглашения и номер телефона.".into()));
                                         return;
@@ -360,7 +368,9 @@ pub fn InvitationAccountAuthPage(
                                     generation += 1;
                                     let operation_generation = generation();
                                     let api = api.clone();
-                                    let request = SmsRequestInput { invitation_code: invitation(), phone: phone() };
+                                    let request = SmsRequestInput { invitation_code: invitation(), phone: phone(), personal_data_consent: true, authorization_sms_consent: true };
+                                    personal_data_consent.set(false);
+                                    authorization_sms_consent.set(false);
                                     spawn(async move {
                                         let result = api.request_sms(&request).await;
                                         if !accepts_completion(generation(), operation_generation) { return; }
@@ -432,9 +442,10 @@ pub fn InvitationAccountAuthPage(
                                 },
                                 if operation() == UiOperation::VerifyingSms { "Проверка..." } else { "Подтвердить код" }
                             }
+                            RegistrationSmsLegalControls { personal_data_consent, authorization_sms_consent }
                             button {
                                 class: "btn-secondary w-full", r#type: "button",
-                                disabled: !resend_action_is_allowed(
+                                disabled: !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) || !resend_action_is_allowed(
                                     operation(),
                                     resend_ready(),
                                     js_sys::Date::now(),
@@ -444,7 +455,7 @@ pub fn InvitationAccountAuthPage(
                                     let available_at = resend_available_at()
                                         .as_deref()
                                         .and_then(timestamp_millis);
-                                    if !resend_action_is_allowed(
+                                    if !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) || !resend_action_is_allowed(
                                         operation(),
                                         resend_ready(),
                                         js_sys::Date::now(),
@@ -457,7 +468,9 @@ pub fn InvitationAccountAuthPage(
                                     generation += 1;
                                     let operation_generation = generation();
                                     let api = resend_api.clone();
-                                    let request = SmsRequestInput { invitation_code: invitation(), phone: phone() };
+                                    let request = SmsRequestInput { invitation_code: invitation(), phone: phone(), personal_data_consent: true, authorization_sms_consent: true };
+                                    personal_data_consent.set(false);
+                                    authorization_sms_consent.set(false);
                                     spawn(async move {
                                         let result = api.request_sms(&request).await;
                                         if !accepts_completion(generation(), operation_generation) { return; }
@@ -485,14 +498,14 @@ pub fn InvitationAccountAuthPage(
                     AccountAuthMode::RegistrationDetails => rsx! {
                         div { class: "auth-form",
                             div { class: "form-field",
-                                label { class: "field-label", r#for: "account-name", "Имя" }
+                                label { class: "field-label", r#for: "account-name", "ФИО" }
                                 input { id: "account-name", class: "field-input", autocomplete: "name", value: "{display_name}", oninput: move |event| display_name.set(event.value()) }
                             }
                             div { class: "form-field",
                                 label { class: "field-label", r#for: "account-password", "Пароль" }
                                 input { id: "account-password", class: "field-input", r#type: "password", autocomplete: "new-password", minlength: "12", maxlength: "72", value: "{password}", oninput: move |event| password.set(event.value()) }
                             }
-                            AccountLegalNotice { context: AccountLegalContext::InvitationRegistration }
+                            AccountCreationLegalNotice {}
                             button {
                                 class: "btn-primary w-full", r#type: "button",
                                 disabled: operation() != UiOperation::Idle,

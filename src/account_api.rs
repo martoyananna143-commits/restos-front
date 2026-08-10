@@ -5,6 +5,12 @@ use std::fmt;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const DOCUMENT_SET_VERSION: &str = "restos-account-legal-2026-08-10-v1";
+pub const PRIVACY_VERSION: &str = "restos-privacy-2026-08-10-v1";
+pub const PD_CONSENT_VERSION: &str = "restos-pd-consent-2026-08-10-v1";
+pub const TERMS_VERSION: &str = "restos-terms-2026-08-10-v1";
+pub const AUTH_SMS_CONSENT_VERSION: &str = "restos-auth-sms-consent-2026-08-10-v1";
+
 #[cfg(target_arch = "wasm32")]
 use gloo_net::http::{Request, Response};
 #[cfg(target_arch = "wasm32")]
@@ -110,6 +116,8 @@ pub struct RefreshedAccountSession {
 pub struct SmsRequestInput {
     pub invitation_code: String,
     pub phone: String,
+    pub personal_data_consent: bool,
+    pub authorization_sms_consent: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -130,6 +138,40 @@ pub struct SmsVerifyInput {
 #[derive(Clone, Debug, Serialize)]
 pub struct StandaloneSmsRequestInput {
     pub phone: String,
+    pub personal_data_consent: bool,
+    pub authorization_sms_consent: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PasswordResetSmsRequestInput {
+    pub phone: String,
+    pub authorization_sms_consent: bool,
+}
+
+#[derive(Serialize)]
+struct RegistrationSmsRequest<'a> {
+    phone: &'a str,
+    personal_data_consent: bool,
+    personal_data_consent_version: &'static str,
+    authorization_sms_consent: bool,
+    authorization_sms_consent_version: &'static str,
+}
+
+#[derive(Serialize)]
+struct InvitationSmsRequest<'a> {
+    invitation_code: &'a str,
+    phone: &'a str,
+    personal_data_consent: bool,
+    personal_data_consent_version: &'static str,
+    authorization_sms_consent: bool,
+    authorization_sms_consent_version: &'static str,
+}
+
+#[derive(Serialize)]
+struct PasswordResetSmsRequest<'a> {
+    phone: &'a str,
+    authorization_sms_consent: bool,
+    authorization_sms_consent_version: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -215,6 +257,9 @@ struct StandaloneRegistrationRequest<'a> {
     device_challenge_id: Uuid,
     device_challenge_nonce: &'a str,
     device_challenge_signature: String,
+    document_set_version: &'static str,
+    terms_version: &'static str,
+    privacy_version: &'static str,
 }
 
 #[derive(Serialize)]
@@ -277,6 +322,9 @@ struct WebRegistrationRequest<'a> {
     device_challenge_id: Uuid,
     device_challenge_nonce: &'a str,
     device_challenge_signature: String,
+    document_set_version: &'static str,
+    terms_version: &'static str,
+    privacy_version: &'static str,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -395,8 +443,18 @@ impl AccountApiClient {
         &self,
         input: &SmsRequestInput,
     ) -> Result<SmsRequested, AccountApiError> {
-        self.public_json_post("/api/v1/auth/invitations/sms/request", input)
-            .await
+        self.public_json_post(
+            "/api/v1/auth/invitations/sms/request",
+            &InvitationSmsRequest {
+                invitation_code: &input.invitation_code,
+                phone: &input.phone,
+                personal_data_consent: input.personal_data_consent,
+                personal_data_consent_version: PD_CONSENT_VERSION,
+                authorization_sms_consent: input.authorization_sms_consent,
+                authorization_sms_consent_version: AUTH_SMS_CONSENT_VERSION,
+            },
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -472,6 +530,9 @@ impl AccountApiClient {
                     device_challenge_id: challenge.device_challenge_id,
                     device_challenge_nonce: &challenge.nonce,
                     device_challenge_signature: encode_base64(signature.as_bytes()),
+                    document_set_version: DOCUMENT_SET_VERSION,
+                    terms_version: TERMS_VERSION,
+                    privacy_version: PRIVACY_VERSION,
                 },
             )
             .await?;
@@ -489,8 +550,17 @@ impl AccountApiClient {
         &self,
         input: &StandaloneSmsRequestInput,
     ) -> Result<SmsRequested, AccountApiError> {
-        self.web_json_post("/api/v1/auth/account/registration/sms/request", input)
-            .await
+        self.web_json_post(
+            "/api/v1/auth/account/registration/sms/request",
+            &RegistrationSmsRequest {
+                phone: &input.phone,
+                personal_data_consent: input.personal_data_consent,
+                personal_data_consent_version: PD_CONSENT_VERSION,
+                authorization_sms_consent: input.authorization_sms_consent,
+                authorization_sms_consent_version: AUTH_SMS_CONSENT_VERSION,
+            },
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -560,6 +630,9 @@ impl AccountApiClient {
                     device_challenge_id: challenge.device_challenge_id,
                     device_challenge_nonce: &challenge.nonce,
                     device_challenge_signature: encode_base64url(signature.as_bytes()),
+                    document_set_version: DOCUMENT_SET_VERSION,
+                    terms_version: TERMS_VERSION,
+                    privacy_version: PRIVACY_VERSION,
                 },
             )
             .await?,
@@ -597,10 +670,17 @@ impl AccountApiClient {
     #[cfg(target_arch = "wasm32")]
     pub async fn request_password_reset_sms(
         &self,
-        input: &StandaloneSmsRequestInput,
+        input: &PasswordResetSmsRequestInput,
     ) -> Result<SmsRequested, AccountApiError> {
-        self.web_json_post("/api/v1/auth/account/password-reset/sms/request", input)
-            .await
+        self.web_json_post(
+            "/api/v1/auth/account/password-reset/sms/request",
+            &PasswordResetSmsRequest {
+                phone: &input.phone,
+                authorization_sms_consent: input.authorization_sms_consent,
+                authorization_sms_consent_version: AUTH_SMS_CONSENT_VERSION,
+            },
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -808,5 +888,18 @@ mod tests {
         assert!(routes
             .iter()
             .all(|route| route.starts_with("/api/v1/auth/account/")));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn p0_legal_versions_are_exact_and_not_runtime_configurable() {
+        assert_eq!(DOCUMENT_SET_VERSION, "restos-account-legal-2026-08-10-v1");
+        assert_eq!(PRIVACY_VERSION, "restos-privacy-2026-08-10-v1");
+        assert_eq!(PD_CONSENT_VERSION, "restos-pd-consent-2026-08-10-v1");
+        assert_eq!(TERMS_VERSION, "restos-terms-2026-08-10-v1");
+        assert_eq!(
+            AUTH_SMS_CONSENT_VERSION,
+            "restos-auth-sms-consent-2026-08-10-v1"
+        );
     }
 }

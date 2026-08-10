@@ -3515,6 +3515,42 @@ button:focus-visible,
   font-size: 0.875rem;
   line-height: 1.45;
 }
+.account-legal-copy a,
+.account-legal-control a {
+  color: #ff9c85;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+.account-legal-controls {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.06);
+}
+.account-legal-control {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  color: var(--text2);
+  font-size: 0.875rem;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.account-legal-control input {
+  width: 20px;
+  height: 20px;
+  margin: 2px 0 0 10px;
+  accent-color: #ff8d7a;
+}
+.account-legal-help {
+  margin: 0;
+  color: var(--text2);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
 .account-legal-links {
   display: flex;
   flex-wrap: wrap;
