@@ -15,7 +15,10 @@ use crate::{
     passkey::{PasskeyAdapter, PasskeyError},
 };
 
-use super::account_portal::{safe_account_error, safe_passkey_error, InvitationAccountAuthPage};
+use super::{
+    account_legal_notice::{AccountLegalContext, AccountLegalNotice},
+    account_portal::{safe_account_error, safe_passkey_error, InvitationAccountAuthPage},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -196,6 +199,7 @@ pub fn AccountAuthPage(
                             button { class: "btn-ghost account-auth-link", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::RegistrationPhone), "Создать аккаунт" }
                             button { class: "btn-ghost account-auth-link", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::Invitation), "Регистрация по приглашению" }
                             button { class: "btn-ghost account-auth-link", r#type: "button", onclick: move |_| on_legacy_login.call(()), "Старый вход для существующей версии" }
+                            AccountLegalNotice { context: AccountLegalContext::Login }
                         } }
                     },
                     Mode::RegistrationPhone | Mode::ResetPhone => {
@@ -206,6 +210,7 @@ pub fn AccountAuthPage(
                                 label { class: "field-label", r#for: "standalone-phone", "Номер телефона" }
                                 input { id: "standalone-phone", class: "field-input", r#type: "tel", autocomplete: "tel", value: "{phone}", oninput: move |event| phone.set(event.value()) }
                             }
+                            AccountLegalNotice { context: if is_registration { AccountLegalContext::RegistrationSms } else { AccountLegalContext::PasswordResetSms } }
                             button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
                                 onclick: move |_| {
                                     if busy() || !phone_is_plausible(&phone()) { error.set(Some("Проверьте номер телефона.".into())); return; }
@@ -270,6 +275,7 @@ pub fn AccountAuthPage(
                             div { class: "form-field", label { class: "field-label", r#for: "standalone-name", "Имя" } input { id: "standalone-name", class: "field-input", autocomplete: "name", maxlength: "255", value: "{display_name}", oninput: move |event| display_name.set(event.value()) } }
                             div { class: "form-field", label { class: "field-label", r#for: "standalone-new-password", "Пароль" } input { id: "standalone-new-password", class: "field-input", r#type: "password", autocomplete: "new-password", minlength: "12", maxlength: "72", value: "{password}", oninput: move |event| password.set(event.value()) } }
                             p { class: "account-auth-help", "От 12 до 72 байт. Не используйте пароль от других сервисов." }
+                            AccountLegalNotice { context: AccountLegalContext::AccountCreation }
                             button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
                                 onclick: move |_| {
                                     let Some(challenge_id) = challenge() else { error.set(Some("Запросите новый код.".into())); return; };

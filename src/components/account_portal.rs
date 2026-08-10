@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::{
+    account_legal_notice::{AccountLegalContext, AccountLegalNotice},
     bootstrap_owner_capability, capability_from_probe, AssessmentAttemptsPage,
     AssessmentManagementPage, AssessmentsPage, ManagerCapability,
 };
@@ -324,6 +325,7 @@ pub fn InvitationAccountAuthPage(
                                 onclick: move |_| on_legacy_login.call(()),
                                 "Старый вход для существующей версии"
                             }
+                            AccountLegalNotice { context: AccountLegalContext::Login }
                         }
                     },
                     AccountAuthMode::Phone => rsx! {
@@ -344,6 +346,7 @@ pub fn InvitationAccountAuthPage(
                                     oninput: move |event| phone.set(event.value()),
                                 }
                             }
+                            AccountLegalNotice { context: AccountLegalContext::InvitationRegistration }
                             button {
                                 class: "btn-primary w-full", r#type: "button",
                                 disabled: operation() != UiOperation::Idle,
@@ -489,6 +492,7 @@ pub fn InvitationAccountAuthPage(
                                 label { class: "field-label", r#for: "account-password", "Пароль" }
                                 input { id: "account-password", class: "field-input", r#type: "password", autocomplete: "new-password", minlength: "12", maxlength: "72", value: "{password}", oninput: move |event| password.set(event.value()) }
                             }
+                            AccountLegalNotice { context: AccountLegalContext::InvitationRegistration }
                             button {
                                 class: "btn-primary w-full", r#type: "button",
                                 disabled: operation() != UiOperation::Idle,

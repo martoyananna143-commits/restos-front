@@ -3429,6 +3429,36 @@ button:focus-visible,
   .account-pilot *, .account-auth-root * { scroll-behavior: auto; transition: none; animation: none; }
 }
 
+.account-legal-notice {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.06);
+}
+.account-legal-copy {
+  margin: 0;
+  color: var(--text2);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+.account-legal-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.8rem;
+}
+.account-legal-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: #ff9c85;
+  font-size: 0.875rem;
+  line-height: 1.3;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
 /* ── Account assessment management ───────────────────── */
 .management-page { width: min(1180px,100%); margin: 0 auto; padding: clamp(24px,5vw,52px) clamp(16px,4vw,40px) 56px; color: var(--text); }
 .management-hero, .management-detail-head, .management-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }

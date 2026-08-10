@@ -8,6 +8,7 @@ pub use shared::{
     ErrorView, EvaluationDetailSkeleton, EvaluationsOverviewSkeleton, FormPrepareSkeleton,
     HomeDashboardSkeleton, LoadingView, SessionGateSkeleton,
 };
+mod account_legal_notice;
 mod inputs;
 mod question;
 mod form;
