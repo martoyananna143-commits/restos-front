@@ -1,8 +1,8 @@
 //! Auth state management — stores JWT session in localStorage.
 
+use crate::types::OrgInfo;
 use gloo_storage::{LocalStorage, Storage};
 use serde::{Deserialize, Serialize};
-use crate::types::OrgInfo;
 
 const STORAGE_KEY: &str = "restos_auth";
 

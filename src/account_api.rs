@@ -164,6 +164,28 @@ pub struct PasswordResetCompleteInput {
     pub new_password: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct CreateFirstCompanyInput {
+    pub company_name: String,
+    pub venue_name: Option<String>,
+    pub timezone: String,
+    pub locale: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct FirstCompanyResponse {
+    pub created: bool,
+    pub company_id: Uuid,
+    pub company_name: String,
+    pub company_code: String,
+    pub employee_profile_id: Uuid,
+    pub position_id: Uuid,
+    pub access_profile_id: Uuid,
+    pub employee_assignment_id: Uuid,
+    pub venue_id: Option<Uuid>,
+    pub relationship: String,
+}
+
 #[derive(Serialize)]
 struct AccountDeviceChallengeRequest<'a> {
     phone_verification_challenge_id: Uuid,
@@ -608,6 +630,16 @@ impl AccountApiClient {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub async fn create_first_company(
+        &self,
+        token: &AccountAccessToken,
+        input: &CreateFirstCompanyInput,
+    ) -> Result<FirstCompanyResponse, AccountApiError> {
+        self.authenticated_web_json_post("/api/v1/account/companies/first", token, input)
+            .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
     async fn accept_auth_response(
         &self,
         response: AccountAuthResponse,
@@ -648,6 +680,28 @@ impl AccountApiClient {
         let response = Request::post(&format!("{}{}", self.base_url, path))
             .credentials(RequestCredentials::Include)
             .header(WEB_SESSION_HEADER, "1")
+            .json(body)
+            .map_err(|_| AccountApiError::InvalidRequest)?
+            .send()
+            .await
+            .map_err(|_| AccountApiError::NetworkUnavailable)?;
+        parse_json(response).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn authenticated_web_json_post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        token: &AccountAccessToken,
+        body: &B,
+    ) -> Result<T, AccountApiError> {
+        let response = Request::post(&format!("{}{}", self.base_url, path))
+            .credentials(RequestCredentials::Include)
+            .header(WEB_SESSION_HEADER, "1")
+            .header(
+                "Authorization",
+                &format!("Bearer {}", token.expose_to_authorization_header()),
+            )
             .json(body)
             .map_err(|_| AccountApiError::InvalidRequest)?
             .send()

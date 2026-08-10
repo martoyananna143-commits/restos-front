@@ -18,18 +18,28 @@ fn initials(name: &str) -> String {
             "{}{}",
             a.chars().next().unwrap_or('?'),
             b.chars().next().unwrap_or('?')
-        ).to_uppercase(),
+        )
+        .to_uppercase(),
     }
 }
 
 fn av_color(name: &str) -> &'static str {
     match name.bytes().next().unwrap_or(0) % 4 {
-        0 => "av-amber", 1 => "av-blue", 2 => "av-green", _ => "av-purple",
+        0 => "av-amber",
+        1 => "av-blue",
+        2 => "av-green",
+        _ => "av-purple",
     }
 }
 
 fn score_color(s: f64) -> &'static str {
-    if s >= 80.0 { "var(--green)" } else if s >= 60.0 { "var(--amber)" } else { "var(--red)" }
+    if s >= 80.0 {
+        "var(--green)"
+    } else if s >= 60.0 {
+        "var(--amber)"
+    } else {
+        "var(--red)"
+    }
 }
 
 fn format_criterion_value(value_type: &str, value: &Option<JsonValue>) -> String {
@@ -109,13 +119,14 @@ pub fn EvaluationsPage(
                 _ => Vec::new(),
             };
             let types_count = types_items.len();
-            let filtered: Vec<&EvaluationItem> = evals.iter().filter(|ev| {
-                match filter_val.as_str() {
+            let filtered: Vec<&EvaluationItem> = evals
+                .iter()
+                .filter(|ev| match filter_val.as_str() {
                     "completed" => ev.score_percentage.is_some(),
                     "in_progress" => ev.score_percentage.is_none(),
                     _ => true,
-                }
-            }).collect();
+                })
+                .collect();
 
             if let Some(eid) = selected_id() {
                 return rsx! {
@@ -300,14 +311,24 @@ fn ConfigEntryCard(
 
 #[component]
 fn EvalCard(item: EvaluationItem, on_open: EventHandler<()>) -> Element {
-    let name = item.evaluated_employee_name.clone().unwrap_or_else(|| "Неизвестно".into());
+    let name = item
+        .evaluated_employee_name
+        .clone()
+        .unwrap_or_else(|| "Неизвестно".into());
     let init = initials(&name);
     let av_cls = av_color(&name);
-    let type_name = item.evaluation_type_name.clone().unwrap_or_else(|| "Замер".into());
+    let type_name = item
+        .evaluation_type_name
+        .clone()
+        .unwrap_or_else(|| "Замер".into());
     let status = item.status.clone().unwrap_or_else(|| "completed".into());
 
     // Date formatting (just show raw string, first 10 chars)
-    let date = if item.created_at.len() >= 10 { &item.created_at[..10] } else { &item.created_at };
+    let date = if item.created_at.len() >= 10 {
+        &item.created_at[..10]
+    } else {
+        &item.created_at
+    };
 
     rsx! {
         div {

@@ -15,10 +15,18 @@ pub fn NavBar(
     on_navigate: EventHandler<String>,
 ) -> Element {
     let auth = AuthState::load();
-    let user_name = auth.as_ref().map(|state| state.name.clone()).unwrap_or_default();
+    let user_name = auth
+        .as_ref()
+        .map(|state| state.name.clone())
+        .unwrap_or_default();
     let organization = auth
         .as_ref()
-        .and_then(|state| state.available_orgs.iter().find(|org| org.id == state.org_id))
+        .and_then(|state| {
+            state
+                .available_orgs
+                .iter()
+                .find(|org| org.id == state.org_id)
+        })
         .map(|org| org.name.clone())
         .unwrap_or_else(|| "Организация".to_string());
 
@@ -123,7 +131,9 @@ fn NavItem(
 }
 
 fn initials(name: &str) -> String {
-    let mut parts = name.split_whitespace().filter_map(|part| part.chars().next());
+    let mut parts = name
+        .split_whitespace()
+        .filter_map(|part| part.chars().next());
     match (parts.next(), parts.next()) {
         (Some(first), Some(second)) => format!("{first}{second}").to_uppercase(),
         (Some(first), None) => first.to_uppercase().to_string(),

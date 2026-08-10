@@ -32,7 +32,11 @@ fn criterion_meta(value_type: &str) -> (&'static str, &'static str) {
 }
 
 #[component]
-pub fn CriterionSetsPage(token: String, on_back: EventHandler<()>, on_open_ai: EventHandler<()>) -> Element {
+pub fn CriterionSetsPage(
+    token: String,
+    on_back: EventHandler<()>,
+    on_open_ai: EventHandler<()>,
+) -> Element {
     let mut view = use_signal(|| View::List);
     let t = token.clone();
     let mut sets_data = use_resource(move || {
@@ -345,12 +349,22 @@ fn CriterionSetForm(
     set: Option<CriterionSetOption>,
 ) -> Element {
     let is_edit = set.is_some();
-    let mut name = use_signal(|| set.as_ref().map(|item| item.name.clone()).unwrap_or_default());
-    let mut description =
-        use_signal(|| set.as_ref().and_then(|item| item.description.clone()).unwrap_or_default());
+    let mut name = use_signal(|| {
+        set.as_ref()
+            .map(|item| item.name.clone())
+            .unwrap_or_default()
+    });
+    let mut description = use_signal(|| {
+        set.as_ref()
+            .and_then(|item| item.description.clone())
+            .unwrap_or_default()
+    });
     let mut is_default = use_signal(|| set.as_ref().map(|item| item.is_default).unwrap_or(false));
-    let mut selected_ids =
-        use_signal(|| set.as_ref().and_then(|item| item.criterion_ids.clone()).unwrap_or_default());
+    let mut selected_ids = use_signal(|| {
+        set.as_ref()
+            .and_then(|item| item.criterion_ids.clone())
+            .unwrap_or_default()
+    });
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
@@ -668,7 +682,11 @@ enum FolderStep {
 }
 
 #[component]
-fn GoogleFolderView(token: String, on_back: EventHandler<()>, on_done: EventHandler<()>) -> Element {
+fn GoogleFolderView(
+    token: String,
+    on_back: EventHandler<()>,
+    on_done: EventHandler<()>,
+) -> Element {
     let mut step = use_signal(|| FolderStep::EnterUrl);
     let mut folder_url = use_signal(String::new);
     let mut files = use_signal(|| Vec::<crate::types::GoogleDriveFileItem>::new());

@@ -4,11 +4,11 @@ use dioxus::prelude::*;
 use qrcodegen::{QrCode, QrCodeEcc};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::clipboard_safe;
+use super::shared::{ErrorView, LoadingView};
 use crate::api;
 use crate::auth::AuthState;
+use crate::clipboard_safe;
 use crate::types::{CreateInvitationRequest, Employee, EmployeeTypeOption, Invitation, OrgInfo};
-use super::shared::{ErrorView, LoadingView};
 
 fn initials(name: &str) -> String {
     let parts: Vec<&str> = name.split_whitespace().collect();
@@ -19,13 +19,17 @@ fn initials(name: &str) -> String {
             "{}{}",
             a.chars().next().unwrap_or('?'),
             b.chars().next().unwrap_or('?')
-        ).to_uppercase(),
+        )
+        .to_uppercase(),
     }
 }
 
 fn av_color(name: &str) -> &'static str {
     match name.bytes().next().unwrap_or(0) % 4 {
-        0 => "av-amber", 1 => "av-blue", 2 => "av-green", _ => "av-purple",
+        0 => "av-amber",
+        1 => "av-blue",
+        2 => "av-green",
+        _ => "av-purple",
     }
 }
 
@@ -85,7 +89,9 @@ fn spawn_copy_invite_link(
 }
 
 fn confirm_dismiss(full_name: &str) -> bool {
-    let msg = format!("Уволить сотрудника \"{full_name}\"? Действие можно отменить только через восстановление.");
+    let msg = format!(
+        "Уволить сотрудника \"{full_name}\"? Действие можно отменить только через восстановление."
+    );
     web_sys::window()
         .and_then(|w| w.confirm_with_message(&msg).ok())
         .unwrap_or(false)
@@ -194,15 +200,19 @@ pub fn EmployeesPage(token: String, is_employee_role: bool) -> Element {
     let admin_count = emps.iter().filter(|e| e.is_admin).count();
     let active_count = emps.iter().filter(|e| e.is_active).count();
 
-    let filtered: Vec<&Employee> = emps.iter().filter(|e| {
-        let name_match = search_val.is_empty() || e.full_name.to_lowercase().contains(&search_val);
-        let role_match = match filter_val.as_str() {
-            "admin" => e.is_admin,
-            "employee" => !e.is_admin,
-            _ => true,
-        };
-        name_match && role_match
-    }).collect();
+    let filtered: Vec<&Employee> = emps
+        .iter()
+        .filter(|e| {
+            let name_match =
+                search_val.is_empty() || e.full_name.to_lowercase().contains(&search_val);
+            let role_match = match filter_val.as_str() {
+                "admin" => e.is_admin,
+                "employee" => !e.is_admin,
+                _ => true,
+            };
+            name_match && role_match
+        })
+        .collect();
 
     rsx! {
         div { class: "app-screen",
@@ -818,11 +828,17 @@ fn InviteWizard(
         .find(|r| Some(r.id) == invite_role_id())
         .map(|r| r.name.clone())
         .unwrap_or_else(|| "Не выбрано".to_string());
-    let contact_label = if !invite_email().is_empty() { invite_email() } else { invite_tg() };
-    let position_label = if invite_position().is_empty() { "-".to_string() } else { invite_position() };
-    let qr_url = success
-        .as_ref()
-        .and_then(|ok| qr_data_url(&ok.invite_url));
+    let contact_label = if !invite_email().is_empty() {
+        invite_email()
+    } else {
+        invite_tg()
+    };
+    let position_label = if invite_position().is_empty() {
+        "-".to_string()
+    } else {
+        invite_position()
+    };
+    let qr_url = success.as_ref().and_then(|ok| qr_data_url(&ok.invite_url));
 
     rsx! {
         div { class: "pad", style: "margin-top: 14px;",

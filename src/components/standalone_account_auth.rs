@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use crate::{
     account_api::{
-        AccountApiClient, AccountApiError, PasswordLoginInput, PasswordResetCompleteInput,
-        SmsRequested, StandaloneRegistrationInput, StandaloneSmsRequestInput,
-        StandaloneSmsVerifyInput,
+        AccountApiClient, AccountApiError, CreateFirstCompanyInput, PasswordLoginInput,
+        PasswordResetCompleteInput, SmsRequested, StandaloneRegistrationInput,
+        StandaloneSmsRequestInput, StandaloneSmsVerifyInput,
     },
     account_session::AccountSessionAdapter,
     device_identity::DeviceIdentityAdapter,
@@ -27,19 +27,43 @@ enum Mode {
     RegistrationOtp,
     RegistrationDetails,
     AccountCreated,
+    CreateCompany,
     ResetPhone,
     ResetOtp,
     ResetPassword,
     Invitation,
 }
 
-fn phone_is_plausible(value: &str) -> bool {
+pub(crate) fn phone_is_plausible(value: &str) -> bool {
     let digits = value.chars().filter(char::is_ascii_digit).count();
     (10..=15).contains(&digits) && value.len() <= 32
 }
 
 fn password_is_valid(value: &str) -> bool {
     (12..=72).contains(&value.as_bytes().len())
+}
+
+fn company_onboarding_input(
+    company_name: &str,
+    venue_name: &str,
+) -> Option<CreateFirstCompanyInput> {
+    let company_name = company_name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if company_name.is_empty() || company_name.chars().count() > 255 {
+        return None;
+    }
+    let venue_name = venue_name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if venue_name.chars().count() > 255 {
+        return None;
+    }
+    Some(CreateFirstCompanyInput {
+        company_name,
+        venue_name: (!venue_name.is_empty()).then_some(venue_name),
+        timezone: "Europe/Moscow".into(),
+        locale: "ru-RU".into(),
+    })
 }
 
 fn generic_login_error(error: &AccountApiError) -> &'static str {
@@ -94,6 +118,8 @@ pub fn AccountAuthPage(
     let mut phone = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut display_name = use_signal(String::new);
+    let mut company_name = use_signal(String::new);
+    let mut venue_name = use_signal(String::new);
     let mut otp = use_signal(String::new);
     let mut challenge: Signal<Option<Uuid>> = use_signal(|| None);
     let mut resend_ready = use_signal(|| false);
@@ -108,6 +134,8 @@ pub fn AccountAuthPage(
         phone.set(String::new());
         password.set(String::new());
         display_name.set(String::new());
+        company_name.set(String::new());
+        venue_name.set(String::new());
         otp.set(String::new());
         challenge.set(None);
         resend_ready.set(false);
@@ -130,6 +158,7 @@ pub fn AccountAuthPage(
             "Регистрация аккаунта"
         }
         Mode::AccountCreated => "Аккаунт создан",
+        Mode::CreateCompany => "Создать организацию",
         Mode::ResetPhone | Mode::ResetOtp | Mode::ResetPassword => "Восстановление пароля",
         Mode::Invitation => "Регистрация по приглашению",
     };
@@ -298,8 +327,16 @@ pub fn AccountAuthPage(
                     Mode::AccountCreated => {
                         let offer_passkeys = passkeys.clone(); let offer_session = session.clone();
                         rsx! { div { class: "auth-form",
-                            p { class: "account-auth-help", "Ключ доступа позволит входить с Face ID, Touch ID или кодом устройства." }
                             button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
+                                onclick: move |_| { error.set(None); mode.set(Mode::CreateCompany); },
+                                "Создать организацию"
+                            }
+                            button { class: "btn-secondary w-full", r#type: "button", disabled: busy(),
+                                onclick: move |_| reset_flow(Mode::Invitation),
+                                "У меня есть приглашение"
+                            }
+                            p { class: "account-auth-help", "Ключ доступа позволит входить с Face ID, Touch ID или кодом устройства." }
+                            button { class: "btn-secondary w-full", r#type: "button", disabled: busy(),
                                 onclick: move |_| {
                                     if busy() { return; }
                                     if !PasskeyAdapter::is_supported() { error.set(safe_passkey_error(&PasskeyError::Unavailable).map(str::to_string)); return; }
@@ -312,9 +349,49 @@ pub fn AccountAuthPage(
                                         match result { Ok(()) => on_authenticated.call(()), Err(problem) => error.set(safe_passkey_error(&problem).map(str::to_string)) }
                                     });
                                 },
-                                "Добавить Face ID или ключ доступа"
+                                "Настроить Face ID / ключ доступа"
                             }
-                            button { class: "btn-secondary w-full", r#type: "button", disabled: busy(), onclick: move |_| on_authenticated.call(()), "Продолжить без ключа доступа" }
+                        } }
+                    },
+                    Mode::CreateCompany => {
+                        let create_api = api.clone();
+                        let create_session = session.clone();
+                        rsx! { div { class: "auth-form company-onboarding-form",
+                            div { class: "form-field",
+                                label { class: "field-label", r#for: "first-company-name", "Название организации" }
+                                input { id: "first-company-name", class: "field-input", autocomplete: "organization", maxlength: "255", value: "{company_name}", oninput: move |event| company_name.set(event.value()) }
+                            }
+                            div { class: "form-field",
+                                label { class: "field-label", r#for: "first-venue-name", "Первый ресторан или объект (необязательно)" }
+                                input { id: "first-venue-name", class: "field-input", maxlength: "255", value: "{venue_name}", oninput: move |event| venue_name.set(event.value()) }
+                            }
+                            div { class: "company-onboarding-defaults",
+                                span { "Часовой пояс: Europe/Moscow" }
+                                span { "Язык: ru-RU" }
+                            }
+                            button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
+                                onclick: move |_| {
+                                    let Some(request) = company_onboarding_input(&company_name(), &venue_name()) else { error.set(Some("Проверьте название организации и объекта.".into())); return; };
+                                    if busy() { return; }
+                                    let Ok(token) = create_session.current_token() else { error.set(Some("Сессия недоступна. Войдите снова.".into())); return; };
+                                    busy.set(true); error.set(None); generation += 1; let current_generation = generation();
+                                    let api = create_api.clone(); let session = create_session.clone();
+                                    spawn(async move {
+                                        let created = api.create_first_company(&token, &request).await;
+                                        if generation() != current_generation { return; }
+                                        match created {
+                                            Ok(_) => match session.reload_bootstrap().await {
+                                                Ok(_) if generation() == current_generation => { busy.set(false); status.set(Some("Организация готова.".into())); on_authenticated.call(()); },
+                                                Ok(_) => {},
+                                                Err(problem) => { busy.set(false); error.set(Some(safe_account_error(&problem).into())); },
+                                            },
+                                            Err(problem) => { busy.set(false); error.set(Some(safe_account_error(&problem).into())); },
+                                        }
+                                    });
+                                },
+                                if busy() { "Создание..." } else { "Создать" }
+                            }
+                            button { class: "btn-ghost account-auth-link", r#type: "button", disabled: busy(), onclick: move |_| mode.set(Mode::AccountCreated), "Назад" }
                         } }
                     },
                     Mode::ResetPassword => {
@@ -356,6 +433,7 @@ mod tests {
         assert_eq!(Mode::Login, Mode::Login);
         assert_ne!(Mode::Login, Mode::RegistrationPhone);
         assert_ne!(Mode::RegistrationPhone, Mode::ResetPhone);
+        assert_ne!(Mode::AccountCreated, Mode::CreateCompany);
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -379,5 +457,18 @@ mod tests {
             generic_login_error(&AccountApiError::PermissionDenied),
             generic_login_error(&AccountApiError::InvalidRequest)
         );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn first_company_input_is_explicit_and_optional_venue_is_honest() {
+        let absent = company_onboarding_input("  RestOS Pilot  ", "  ").unwrap();
+        assert_eq!(absent.company_name, "RestOS Pilot");
+        assert_eq!(absent.venue_name, None);
+        assert_eq!(absent.timezone, "Europe/Moscow");
+        assert_eq!(absent.locale, "ru-RU");
+        let present = company_onboarding_input("RestOS", " Первый ресторан ").unwrap();
+        assert_eq!(present.venue_name.as_deref(), Some("Первый ресторан"));
+        assert!(company_onboarding_input("", "Venue").is_none());
     }
 }

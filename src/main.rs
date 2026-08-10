@@ -9,38 +9,40 @@ use dioxus::prelude::*;
 
 mod account_api;
 mod account_session;
+mod api;
 mod assessment_api;
 mod assessment_attempt_api;
 mod assessment_management_api;
-mod api;
 mod auth;
 mod clipboard_safe;
 mod components;
 mod device_identity;
 mod passkey;
 mod passkey_api;
+mod retained;
 mod storage;
 mod types;
 mod user_error;
-mod retained;
+mod workforce_api;
 
+use crate::types::MeResponse;
 use account_api::AccountApiClient;
 use account_session::AccountSessionAdapter;
 use assessment_api::AssessmentApiClient;
 use assessment_attempt_api::AssessmentAttemptApiClient;
 use assessment_management_api::AssessmentManagementApiClient;
 use auth::AuthState;
-use components::{
-    root_after_account_logout, startup_root_state, AccountAuthPage, AccountPage,
-    AccountPilotShell, AccountRootState, AiAssistantPage, AnalyticsPage, AssessmentsPage, AuthPage,
-    EmployeesPage, EvaluationForm, HomePage, InternshipsPage, PinStepUpScreen,
-};
 use components::nav_bar::{BrandMark, NavBar};
+use components::{
+    root_after_account_logout, startup_root_state, AccountAuthPage, AccountPage, AccountPilotShell,
+    AccountRootState, AiAssistantPage, AnalyticsPage, AssessmentsPage, AuthPage, EmployeesPage,
+    EvaluationForm, HomePage, InternshipsPage, PinStepUpScreen,
+};
 use components::{ErrorView, SessionGateSkeleton};
-use crate::types::MeResponse;
 use device_identity::DeviceIdentityAdapter;
 use passkey::PasskeyAdapter;
 use passkey_api::PasskeyApiClient;
+use workforce_api::WorkforceApiClient;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
@@ -110,8 +112,7 @@ fn App() -> Element {
         PasskeyApiClient::new(account_api_base()).expect("Passkey API base must be valid")
     });
     use_context_provider(|| {
-        AssessmentApiClient::new(account_api_base())
-            .expect("Assessment API base must be valid")
+        AssessmentApiClient::new(account_api_base()).expect("Assessment API base must be valid")
     });
     use_context_provider(|| {
         AssessmentAttemptApiClient::new(account_api_base())
@@ -120,6 +121,9 @@ fn App() -> Element {
     use_context_provider(|| {
         AssessmentManagementApiClient::new(account_api_base())
             .expect("Assessment management API base must be valid")
+    });
+    use_context_provider(|| {
+        WorkforceApiClient::new(account_api_base()).expect("Workforce API base must be valid")
     });
     let mut auth = use_signal(|| AuthState::load());
     let mut account_root = use_signal(|| AccountRootState::BootstrappingAccount);
@@ -190,14 +194,20 @@ if (!window.__restosErrorGuardsInstalled) {
             let is_fatal = js_sys::Reflect::get(
                 window.as_ref(),
                 &wasm_bindgen::JsValue::from_str("__RESTOS_FATAL__"),
-            ).ok()?.as_bool().unwrap_or(false);
+            )
+            .ok()?
+            .as_bool()
+            .unwrap_or(false);
             if !is_fatal {
                 return None;
             }
             js_sys::Reflect::get(
                 window.as_ref(),
                 &wasm_bindgen::JsValue::from_str("__RESTOS_FATAL_MESSAGE__"),
-            ).ok()?.as_string().or_else(|| Some("Произошла критическая ошибка интерфейса".to_string()))
+            )
+            .ok()?
+            .as_string()
+            .or_else(|| Some("Произошла критическая ошибка интерфейса".to_string()))
         })
     });
 
@@ -219,13 +229,18 @@ if (!window.__restosErrorGuardsInstalled) {
         // Service worker registration
         document::Script {
             r#type: "text/javascript",
-            dangerous_inner_html: "
+            "
 if ('serviceWorker' in navigator) {{
-  window.addEventListener('load', function() {{
+  const registerServiceWorker = function() {{
     navigator.serviceWorker.register('/sw.js', {{ scope: '/' }})
       .then(function(reg) {{ console.log('[PWA] SW registered, scope:', reg.scope); }})
-      .catch(function(err) {{ console.warn('[PWA] SW registration failed:', err); }});
-  }});
+      .catch(function() {{ console.warn('[PWA] Service worker registration unavailable.'); }});
+  }};
+  if (document.readyState === 'loading') {{
+    window.addEventListener('load', registerServiceWorker, {{ once: true }});
+  }} else {{
+    registerServiceWorker();
+  }}
 }}
 "
         }
@@ -563,9 +578,7 @@ fn MainApp(
     let current = page.read().clone();
     let key = scope_key();
 
-    let me_for_shell = profile_gate()
-        .and_then(|r| r.ok())
-        .or_else(|| gate_stale());
+    let me_for_shell = profile_gate().and_then(|r| r.ok()).or_else(|| gate_stale());
 
     let pin_required = !pin_unlocked()
         && me_for_shell
@@ -609,5 +622,66 @@ fn MainApp(
 
     rsx! {
         {gate_body}
+    }
+}
+
+#[cfg(test)]
+mod service_worker_script_tests {
+    const APP_SOURCE: &str = include_str!("main.rs");
+
+    fn service_worker_script_source() -> &'static str {
+        APP_SOURCE
+            .split_once("// Service worker registration")
+            .and_then(|(_, source)| source.split_once("document::Title"))
+            .map(|(source, _)| source)
+            .expect("service-worker script source must remain present")
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn service_worker_script_is_one_static_text_child() {
+        let source = service_worker_script_source();
+        assert_eq!(source.matches("document::Script {").count(), 1);
+        assert_eq!(source.matches("r#type: \"text/javascript\"").count(), 1);
+        assert_eq!(source.matches("dangerous_inner_html").count(), 0);
+        assert_eq!(source.matches("\n            \"\n").count(), 1);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn service_worker_registration_is_optional_and_root_scoped() {
+        let source = service_worker_script_source();
+        assert!(source.contains("if ('serviceWorker' in navigator)"));
+        assert!(source.contains("navigator.serviceWorker.register('/sw.js'"));
+        assert!(source.contains("scope: '/'"));
+        assert!(source.contains("document.readyState === 'loading'"));
+        assert!(source.contains("once: true"));
+        assert!(source.contains("registerServiceWorker();"));
+        assert!(source.contains(".catch(function()"));
+        assert!(!source.contains("throw "));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn service_worker_script_contains_no_dynamic_or_sensitive_material() {
+        let source = service_worker_script_source();
+        for forbidden in [
+            "dangerous_inner_html",
+            "eval(",
+            "new Function",
+            "http://",
+            "https://",
+            "access_token",
+            "refresh_token",
+            "cookie",
+            "password",
+            "phone",
+            "otp",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "forbidden script material: {forbidden}"
+            );
+        }
     }
 }

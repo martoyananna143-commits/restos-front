@@ -173,6 +173,21 @@ impl AccountSessionAdapter {
             _ => Err(AccountApiError::AuthenticationRequired),
         }
     }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn reload_bootstrap(&self) -> Result<AccountSessionState, AccountApiError> {
+        let (token, expires_at) = match self.state() {
+            AccountSessionState::Authenticated(authenticated) => {
+                (authenticated.access_token, authenticated.expires_at)
+            }
+            _ => return Err(AccountApiError::AuthenticationRequired),
+        };
+        let bootstrap = self.api.bootstrap(&token).await?;
+        let state =
+            AccountSessionState::Authenticated(authenticated_state(token, expires_at, bootstrap));
+        *self.state.borrow_mut() = state.clone();
+        Ok(state)
+    }
 }
 
 fn authenticated_state(

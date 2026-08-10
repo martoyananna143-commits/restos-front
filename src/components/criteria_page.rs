@@ -111,9 +111,18 @@ fn CriteriaList(
                 .cloned()
                 .collect();
 
-            let bool_count = criteria.iter().filter(|item| item.value_type == "boolean").count();
-            let num_count = criteria.iter().filter(|item| item.value_type == "number").count();
-            let text_count = criteria.iter().filter(|item| item.value_type == "string").count();
+            let bool_count = criteria
+                .iter()
+                .filter(|item| item.value_type == "boolean")
+                .count();
+            let num_count = criteria
+                .iter()
+                .filter(|item| item.value_type == "number")
+                .count();
+            let text_count = criteria
+                .iter()
+                .filter(|item| item.value_type == "string")
+                .count();
 
             rsx! {
                 div { class: "app-screen",
@@ -243,14 +252,31 @@ fn CriterionForm(
     criterion: Option<Criterion>,
 ) -> Element {
     let is_edit = criterion.is_some();
-    let mut name = use_signal(|| criterion.as_ref().map(|c| c.name.clone()).unwrap_or_default());
-    let mut code = use_signal(|| criterion.as_ref().map(|c| c.code.clone()).unwrap_or_default());
-    let mut description =
-        use_signal(|| criterion.as_ref().and_then(|c| c.description.clone()).unwrap_or_default());
-    let mut value_type =
-        use_signal(|| criterion.as_ref().map(|c| c.value_type.clone()).unwrap_or_else(|| "boolean".to_string()));
-    let mut is_required =
-        use_signal(|| criterion.as_ref().map(|c| c.is_required).unwrap_or(true));
+    let mut name = use_signal(|| {
+        criterion
+            .as_ref()
+            .map(|c| c.name.clone())
+            .unwrap_or_default()
+    });
+    let mut code = use_signal(|| {
+        criterion
+            .as_ref()
+            .map(|c| c.code.clone())
+            .unwrap_or_default()
+    });
+    let mut description = use_signal(|| {
+        criterion
+            .as_ref()
+            .and_then(|c| c.description.clone())
+            .unwrap_or_default()
+    });
+    let mut value_type = use_signal(|| {
+        criterion
+            .as_ref()
+            .map(|c| c.value_type.clone())
+            .unwrap_or_else(|| "boolean".to_string())
+    });
+    let mut is_required = use_signal(|| criterion.as_ref().map(|c| c.is_required).unwrap_or(true));
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 

@@ -1,10 +1,10 @@
 //! LocalStorage persistence for form answers using gloo-storage
 
+use crate::types::AnswerValue;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types::AnswerValue;
 
 const STORAGE_KEY_PREFIX: &str = "rest_form_";
 
@@ -58,7 +58,7 @@ impl<T: Serialize + DeserializeOwned + Clone + 'static> UsePersistent<T> {
         let _ = LocalStorage::set(inner.key.as_str(), &value);
         inner.value = value;
     }
-    
+
     /// Clear the storage entry
     pub fn clear(&self) {
         let key = &self.inner.read().key;
@@ -70,12 +70,10 @@ impl<T: Serialize + DeserializeOwned + Clone + 'static> UsePersistent<T> {
 pub fn use_form_storage(token: &str) -> UsePersistent<SavedFormState> {
     let key = get_storage_key(token);
     let state = use_signal(move || {
-        let value: SavedFormState = LocalStorage::get(key.as_str())
-            .ok()
-            .unwrap_or_default();
+        let value: SavedFormState = LocalStorage::get(key.as_str()).ok().unwrap_or_default();
         StorageEntry { key, value }
     });
-    
+
     UsePersistent { inner: state }
 }
 

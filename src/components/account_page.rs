@@ -2,9 +2,9 @@
 
 use dioxus::prelude::*;
 
+use super::shared::{ErrorView, LoadingView};
 use crate::api;
 use crate::auth::AuthState;
-use super::shared::{ErrorView, LoadingView};
 
 #[component]
 pub fn AccountPage(
@@ -30,10 +30,7 @@ pub fn AccountPage(
         Some(Err(e)) => rsx! { ErrorView { message: e } },
         Some(Ok(m)) => {
             let has_pin = m.has_pin;
-            let login_disp = m
-                .web_login
-                .clone()
-                .unwrap_or_else(|| "—".to_string());
+            let login_disp = m.web_login.clone().unwrap_or_else(|| "—".to_string());
             let org_disp = m
                 .organization_name
                 .clone()

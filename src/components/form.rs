@@ -3,12 +3,12 @@
 //! Phase 2 (Fill): sticky progress header, collapsible question cards, score ring.
 //! Phase 3 (Success): result card with score breakdown.
 
-use dioxus::prelude::*;
 use crate::api;
 use crate::types::{
-    Answer, AnswerValue, Criterion, CriterionSetOption, Employee,
-    EvaluationTypeOption, StartEvaluationRequest, SubmitRequest,
+    Answer, AnswerValue, Criterion, CriterionSetOption, Employee, EvaluationTypeOption,
+    StartEvaluationRequest, SubmitRequest,
 };
+use dioxus::prelude::*;
 
 // ── Phase state ──────────────────────────────────────────────────────────────
 
@@ -17,13 +17,19 @@ enum Phase {
     Select,
     Loading,
     Fill {
-        evaluation_id:   i64,
-        criteria:        Vec<Criterion>,
-        employee_name:   String,
-        set_name:        String,
+        evaluation_id: i64,
+        criteria: Vec<Criterion>,
+        employee_name: String,
+        set_name: String,
         initial_answers: Vec<Answer>,
     },
-    Success { evaluation_id: i64, score: f64, employee_name: String, set_name: String, total: usize },
+    Success {
+        evaluation_id: i64,
+        score: f64,
+        employee_name: String,
+        set_name: String,
+        total: usize,
+    },
     Error(String),
 }
 
@@ -32,8 +38,7 @@ enum Phase {
 #[component]
 pub fn EvaluationForm(
     token: String,
-    #[props(default)]
-    resume_evaluation_id: Option<i64>,
+    #[props(default)] resume_evaluation_id: Option<i64>,
     on_done: EventHandler<()>,
     on_back: EventHandler<()>,
 ) -> Element {
@@ -57,40 +62,37 @@ pub fn EvaluationForm(
 }
 
 #[component]
-fn EvalFormInner(
-    token: String,
-    on_done: EventHandler<()>,
-    on_back: EventHandler<()>,
-) -> Element {
+fn EvalFormInner(token: String, on_done: EventHandler<()>, on_back: EventHandler<()>) -> Element {
     let mut phase = use_signal(|| Phase::Select);
 
     // EvaluationForm never unmounts — phase (Signal, Copy) is always valid
     // inside spawn async blocks.  We build the on_confirm handler here so it
     // can drive the API call and update phase without any component-boundary issues.
     let tok = token.clone();
-    let on_confirm = move |(emp_id, type_id, set_id, ename, sname): (i64, i64, i64, String, String)| {
-        phase.set(Phase::Loading);
-        let tok2 = tok.clone();
-        let ename2 = ename.clone();
-        let sname2 = sname.clone();
-        spawn(async move {
-            let req = StartEvaluationRequest {
-                evaluated_employee_id: emp_id,
-                criterion_set_id:      set_id,
-                evaluation_type_id:    type_id,
-            };
-            match api::start_evaluation(&tok2, req).await {
-                Ok(resp) => phase.set(Phase::Fill {
-                    evaluation_id: resp.evaluation_id,
-                    criteria:      resp.criteria,
-                    employee_name: ename2,
-                    set_name:      sname2,
-                    initial_answers: vec![],
-                }),
-                Err(e) => phase.set(Phase::Error(e)),
-            }
-        });
-    };
+    let on_confirm =
+        move |(emp_id, type_id, set_id, ename, sname): (i64, i64, i64, String, String)| {
+            phase.set(Phase::Loading);
+            let tok2 = tok.clone();
+            let ename2 = ename.clone();
+            let sname2 = sname.clone();
+            spawn(async move {
+                let req = StartEvaluationRequest {
+                    evaluated_employee_id: emp_id,
+                    criterion_set_id: set_id,
+                    evaluation_type_id: type_id,
+                };
+                match api::start_evaluation(&tok2, req).await {
+                    Ok(resp) => phase.set(Phase::Fill {
+                        evaluation_id: resp.evaluation_id,
+                        criteria: resp.criteria,
+                        employee_name: ename2,
+                        set_name: sname2,
+                        initial_answers: vec![],
+                    }),
+                    Err(e) => phase.set(Phase::Error(e)),
+                }
+            });
+        };
 
     let current = phase.read().clone();
     match current {
@@ -138,7 +140,13 @@ fn EvalFormInner(
                 on_back:  move |_| phase.set(Phase::Select),
             }
         },
-        Phase::Success { evaluation_id, score, employee_name, set_name, total } => rsx! {
+        Phase::Success {
+            evaluation_id,
+            score,
+            employee_name,
+            set_name,
+            total,
+        } => rsx! {
             SuccessScreen {
                 token: token.clone(),
                 evaluation_id,
@@ -270,20 +278,35 @@ fn SelectPhase(
         async move { api::fetch_criterion_sets(&tok, false).await }
     });
 
-    let mut selected_emp:  Signal<Option<i64>> = use_signal(|| None);
+    let mut selected_emp: Signal<Option<i64>> = use_signal(|| None);
     let mut selected_type: Signal<Option<i64>> = use_signal(|| None);
-    let mut selected_set:  Signal<Option<i64>> = use_signal(|| None);
+    let mut selected_set: Signal<Option<i64>> = use_signal(|| None);
     let mut emp_search = use_signal(String::new);
 
-    let emps_ok  = employees.read().as_ref().and_then(|r| r.as_ref().ok().cloned()).unwrap_or_default();
-    let types_ok = eval_types.read().as_ref().and_then(|r| r.as_ref().ok().cloned()).unwrap_or_default();
-    let sets_ok  = crit_sets.read().as_ref().and_then(|r| r.as_ref().ok().cloned()).unwrap_or_default();
-    let loading  = employees.read().is_none() || eval_types.read().is_none() || crit_sets.read().is_none();
+    let emps_ok = employees
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok().cloned())
+        .unwrap_or_default();
+    let types_ok = eval_types
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok().cloned())
+        .unwrap_or_default();
+    let sets_ok = crit_sets
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok().cloned())
+        .unwrap_or_default();
+    let loading =
+        employees.read().is_none() || eval_types.read().is_none() || crit_sets.read().is_none();
 
     // Auto-select default criterion set
     use_effect(move || {
-        if selected_set() .is_none() {
-            if let Some(def) = crit_sets.read().as_ref()
+        if selected_set().is_none() {
+            if let Some(def) = crit_sets
+                .read()
+                .as_ref()
                 .and_then(|r| r.as_ref().ok())
                 .and_then(|sets| sets.iter().find(|s| s.is_default))
             {
@@ -294,9 +317,17 @@ fn SelectPhase(
     // Auto-select first eval type if only one
     use_effect(move || {
         if selected_type().is_none() {
-            if let Some(t) = eval_types.read().as_ref()
+            if let Some(t) = eval_types
+                .read()
+                .as_ref()
                 .and_then(|r| r.as_ref().ok())
-                .and_then(|types| if types.len() == 1 { types.first() } else { None })
+                .and_then(|types| {
+                    if types.len() == 1 {
+                        types.first()
+                    } else {
+                        None
+                    }
+                })
             {
                 selected_type.set(Some(t.id));
             }
@@ -307,30 +338,43 @@ fn SelectPhase(
         selected_emp().is_some(),
         selected_set().is_some(),
         selected_type().is_some(),
-    ].iter().filter(|&&b| b).count();
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
     let step_total = 3;
-    let can_start = selected_emp().is_some() && selected_set().is_some()
-        && selected_type().is_some();
+    let can_start =
+        selected_emp().is_some() && selected_set().is_some() && selected_type().is_some();
     let mini_pct = selected_count * 100 / step_total.max(1);
 
     let emps_for_closure = emps_ok.clone();
     let sets_for_closure = sets_ok.clone();
     let types_for_closure = types_ok.clone();
     let on_submit = move |_: Event<MouseData>| {
-        let emp_id  = match selected_emp()  { Some(v) => v, None => return };
-        let set_id  = match selected_set()  { Some(v) => v, None => return };
+        let emp_id = match selected_emp() {
+            Some(v) => v,
+            None => return,
+        };
+        let set_id = match selected_set() {
+            Some(v) => v,
+            None => return,
+        };
         // Use explicitly selected type, or auto-pick first available
-        let type_id = match selected_type()
-            .or_else(|| types_for_closure.first().map(|t| t.id))
-        {
+        let type_id = match selected_type().or_else(|| types_for_closure.first().map(|t| t.id)) {
             Some(v) => v,
             None => return,
         };
 
-        let ename = emps_for_closure.iter().find(|e| e.id == emp_id)
-            .map(|e| e.full_name.clone()).unwrap_or_default();
-        let sname = sets_for_closure.iter().find(|s| s.id == set_id)
-            .map(|s| s.name.clone()).unwrap_or_default();
+        let ename = emps_for_closure
+            .iter()
+            .find(|e| e.id == emp_id)
+            .map(|e| e.full_name.clone())
+            .unwrap_or_default();
+        let sname = sets_for_closure
+            .iter()
+            .find(|s| s.id == set_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
 
         // Pass selection back to EvaluationForm — no async here, no unmounting issues.
         on_confirm.call((emp_id, type_id, set_id, ename, sname));
@@ -338,7 +382,8 @@ fn SelectPhase(
 
     // Filter employees by search
     let search_val = emp_search.read().to_lowercase();
-    let filtered_emps: Vec<&Employee> = emps_ok.iter()
+    let filtered_emps: Vec<&Employee> = emps_ok
+        .iter()
         .filter(|e| search_val.is_empty() || e.full_name.to_lowercase().contains(&search_val))
         .collect();
 
@@ -547,24 +592,23 @@ fn flush_text_answers_to_value(states: &mut [CriterionState]) {
 #[derive(Clone, PartialEq)]
 struct CriterionState {
     criterion: Criterion,
-    value:     Signal<Option<AnswerValue>>,
+    value: Signal<Option<AnswerValue>>,
     /// For text/string criteria: live textarea text; `value` is updated on blur (and before submit).
     text_buffer: Signal<String>,
-    comment:   Signal<Option<String>>,
+    comment: Signal<Option<String>>,
 }
 
 #[component]
 fn FillPhase(
-    token:         String,
+    token: String,
     evaluation_id: i64,
-    criteria:      Vec<Criterion>,
+    criteria: Vec<Criterion>,
     employee_name: String,
-    set_name:      String,
-    #[props(default)]
-    initial_answers: Vec<Answer>,
-    on_done:  EventHandler<(f64, String, String, usize)>,
+    set_name: String,
+    #[props(default)] initial_answers: Vec<Answer>,
+    on_done: EventHandler<(f64, String, String, usize)>,
     on_error: EventHandler<String>,
-    on_back:  EventHandler<()>,
+    on_back: EventHandler<()>,
 ) -> Element {
     let mut states_sig: Signal<Vec<CriterionState>> = use_signal(Vec::new);
     use_effect(move || {
@@ -605,64 +649,98 @@ fn FillPhase(
     let pct = if total > 0 { answered * 100 / total } else { 0 };
 
     // Compute score preview
-    let (score_sum, bool_yes, bool_total, num_sum, num_count, text_answered) =
-        states.iter().fold((0.0_f64, 0usize, 0usize, 0.0_f64, 0usize, 0usize), |acc, s| {
+    let (score_sum, bool_yes, bool_total, num_sum, num_count, text_answered) = states.iter().fold(
+        (0.0_f64, 0usize, 0usize, 0.0_f64, 0usize, 0usize),
+        |acc, s| {
             let (mut ss, mut by, mut bt, mut ns, mut nc, mut ta) = acc;
             match s.criterion.value_type.as_str() {
                 "boolean" => {
                     bt += 1;
                     if let Some(AnswerValue::Boolean(b)) = s.value.read().clone() {
-                        if b { by += 1; ss += 100.0; }
+                        if b {
+                            by += 1;
+                            ss += 100.0;
+                        }
                     }
                 }
                 "number" => {
                     if let Some(AnswerValue::Number(n)) = s.value.read().clone() {
-                        ns += n; nc += 1; ss += n / 5.0 * 100.0;
+                        ns += n;
+                        nc += 1;
+                        ss += n / 5.0 * 100.0;
                     }
                 }
                 _ => {
-                    if s.value.read().is_some() { ta += 1; ss += 100.0; }
+                    if s.value.read().is_some() {
+                        ta += 1;
+                        ss += 100.0;
+                    }
                 }
             }
             (ss, by, bt, ns, nc, ta)
-        });
+        },
+    );
 
-    let preview_pct = if answered > 0 { score_sum / answered as f64 } else { 0.0 };
-    let num_avg = if num_count > 0 { num_sum / num_count as f64 } else { 0.0 };
+    let preview_pct = if answered > 0 {
+        score_sum / answered as f64
+    } else {
+        0.0
+    };
+    let num_avg = if num_count > 0 {
+        num_sum / num_count as f64
+    } else {
+        0.0
+    };
 
     // SVG ring
     let circumference = 131.9_f64;
-    let ring_color = if all_done { "rgba(74,222,128,0.85)" } else { "rgba(245,166,35,0.8)" };
-    let ring_text_color = if all_done { "rgba(74,222,128,0.9)" } else { "rgba(245,166,35,0.9)" };
+    let ring_color = if all_done {
+        "rgba(74,222,128,0.85)"
+    } else {
+        "rgba(245,166,35,0.8)"
+    };
+    let ring_text_color = if all_done {
+        "rgba(74,222,128,0.9)"
+    } else {
+        "rgba(245,166,35,0.9)"
+    };
     let ring_offset = circumference * (1.0 - preview_pct / 100.0);
 
-    let tok  = token.clone();
+    let tok = token.clone();
     let ename = employee_name.clone();
     let sname = set_name.clone();
     let mut states_clone = states.clone();
 
     let on_submit = move |_: Event<MouseData>| {
-        if *submitting.read() { return; }
+        if *submitting.read() {
+            return;
+        }
         submitting.set(true);
         submit_err.set(None);
         flush_text_answers_to_value(&mut states_clone);
-        let answers: Vec<Answer> = states_clone.iter().filter_map(|s| {
-            let v = s.value.read().clone()?;
-            Some(Answer {
-                criterion_id: s.criterion.id,
-                value: v,
-                comment: s.comment.read().clone(),
+        let answers: Vec<Answer> = states_clone
+            .iter()
+            .filter_map(|s| {
+                let v = s.value.read().clone()?;
+                Some(Answer {
+                    criterion_id: s.criterion.id,
+                    value: v,
+                    comment: s.comment.read().clone(),
+                })
             })
-        }).collect();
-        let req = SubmitRequest { answers, comment: None };
+            .collect();
+        let req = SubmitRequest {
+            answers,
+            comment: None,
+        };
         let tok2 = tok.clone();
-        let en2  = ename.clone();
-        let sn2  = sname.clone();
+        let en2 = ename.clone();
+        let sn2 = sname.clone();
         let tot2 = total;
         spawn(async move {
             match api::submit_evaluation(&tok2, evaluation_id, req).await {
                 Ok(resp) => on_done.call((resp.score_percentage, en2, sn2, tot2)),
-                Err(e)   => {
+                Err(e) => {
                     submitting.set(false);
                     submit_err.set(Some(e.clone()));
                     on_error.call(e);
@@ -910,11 +988,11 @@ fn FillPhase(
 
 #[component]
 fn CriterionCard(state: CriterionState, index: usize) -> Element {
-    let mut val     = state.value;
-    let text_buffer  = state.text_buffer;
+    let mut val = state.value;
+    let text_buffer = state.text_buffer;
     let mut comment = state.comment;
-    let mut collapsed         = use_signal(|| false);
-    let mut show_comment_inp  = use_signal(|| false);
+    let mut collapsed = use_signal(|| false);
+    let mut show_comment_inp = use_signal(|| false);
 
     let c = state.criterion.clone();
     let is_answered = val.read().is_some();
@@ -929,10 +1007,14 @@ fn CriterionCard(state: CriterionState, index: usize) -> Element {
     let (card_class, num_class) = match (is_answered, c.value_type.as_str()) {
         (true, "number") => ("q-card answered-num", "q-num q-done-num"),
         (true, "text") | (true, "string") => ("q-card answered-str", "q-num q-done-str"),
-        (true, _)  => ("q-card answered",     "q-num q-done"),
-        (false, _) => ("q-card q-focused",    "q-num q-active"),
+        (true, _) => ("q-card answered", "q-num q-done"),
+        (false, _) => ("q-card q-focused", "q-num q-active"),
     };
-    let num_label = if is_answered { "✓".to_string() } else { (index + 1).to_string() };
+    let num_label = if is_answered {
+        "✓".to_string()
+    } else {
+        (index + 1).to_string()
+    };
 
     if is_answered && collapsed() {
         // ── Compact (answered) view ──────────────────
@@ -1081,15 +1163,19 @@ fn compact_answer_badge(value_type: &str, val: &Option<AnswerValue>) -> Element 
                     span { style: "font-size:12px; color:var(--text3);", "/5" }
                 }
             }
-        },
+        }
         (_, Some(AnswerValue::Text(t))) => {
-            let preview = if t.len() > 20 { format!("{}…", &t[..20]) } else { t.clone() };
+            let preview = if t.len() > 20 {
+                format!("{}…", &t[..20])
+            } else {
+                t.clone()
+            };
             rsx! {
                 div { style: "font-size:12px; color:var(--text2); font-style:italic; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;",
                     "«{preview}»"
                 }
             }
-        },
+        }
         _ => rsx! { span {} },
     }
 }
@@ -1100,7 +1186,7 @@ fn compact_answer_badge(value_type: &str, val: &Option<AnswerValue>) -> Element 
 fn YnInput(value: Signal<Option<AnswerValue>>) -> Element {
     let current = value.read().clone();
     let is_yes = matches!(current, Some(AnswerValue::Boolean(true)));
-    let is_no  = matches!(current, Some(AnswerValue::Boolean(false)));
+    let is_no = matches!(current, Some(AnswerValue::Boolean(false)));
 
     rsx! {
         div { class: "yn-row",
@@ -1182,15 +1268,26 @@ fn SuccessScreen(
     set_name: String,
     total: usize,
     on_done: EventHandler<()>,
-    on_new:  EventHandler<()>,
+    on_new: EventHandler<()>,
 ) -> Element {
-    let score_color = if score >= 80.0 { "var(--amber)" } else if score >= 50.0 { "var(--amber)" } else { "var(--red)" };
+    let score_color = if score >= 80.0 {
+        "var(--amber)"
+    } else if score >= 50.0 {
+        "var(--amber)"
+    } else {
+        "var(--red)"
+    };
 
     // Build date string
     let date_str = {
         use js_sys::Date;
         let d = Date::new_0();
-        format!("{:02}.{:02}.{}", d.get_date(), d.get_month() + 1, d.get_full_year())
+        format!(
+            "{:02}.{:02}.{}",
+            d.get_date(),
+            d.get_month() + 1,
+            d.get_full_year()
+        )
     };
 
     rsx! {

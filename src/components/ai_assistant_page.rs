@@ -3,7 +3,9 @@
 use dioxus::prelude::*;
 
 use crate::api;
-use crate::types::{AiChatRequest, AiConfirmRequest, AiCreateCriterionSetRequest, AiMessage, AiPreviewCriterion};
+use crate::types::{
+    AiChatRequest, AiConfirmRequest, AiCreateCriterionSetRequest, AiMessage, AiPreviewCriterion,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {

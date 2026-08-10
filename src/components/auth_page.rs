@@ -1,9 +1,12 @@
-use dioxus::prelude::*;
 use crate::auth::AuthState;
 use crate::types::OrgInfo;
+use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq)]
-enum Tab { Login, Register }
+enum Tab {
+    Login,
+    Register,
+}
 
 #[component]
 pub fn AuthPage(on_auth: EventHandler<AuthState>) -> Element {
@@ -17,7 +20,10 @@ pub fn AuthPage(on_auth: EventHandler<AuthState>) -> Element {
                         .get("auth")
                         .map(|v| v.eq_ignore_ascii_case("register"))
                         .unwrap_or(false);
-                    if wants_register || params.get("invite_code").is_some() || params.get("invite").is_some() {
+                    if wants_register
+                        || params.get("invite_code").is_some()
+                        || params.get("invite").is_some()
+                    {
                         tab.set(Tab::Register);
                     }
                 }
@@ -200,7 +206,11 @@ fn RegisterForm(on_auth: EventHandler<AuthState>) -> Element {
         error.set(None);
         loading.set(true);
         spawn(async move {
-            let org_arg = if standalone { Some(oname.trim().to_string()) } else { None };
+            let org_arg = if standalone {
+                Some(oname.trim().to_string())
+            } else {
+                None
+            };
             match crate::api::register(&code, &name, &l, &p, org_arg.as_deref()).await {
                 Ok(resp) => {
                     let state = AuthState {

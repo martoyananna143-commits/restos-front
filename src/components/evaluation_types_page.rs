@@ -200,15 +200,24 @@ fn EvaluationTypeForm(
     eval_type: Option<EvaluationTypeOption>,
 ) -> Element {
     let is_edit = eval_type.is_some();
-    let mut name = use_signal(|| eval_type.as_ref().map(|item| item.name.clone()).unwrap_or_default());
+    let mut name = use_signal(|| {
+        eval_type
+            .as_ref()
+            .map(|item| item.name.clone())
+            .unwrap_or_default()
+    });
     let mut code = use_signal(|| {
         eval_type
             .as_ref()
             .and_then(|item| item.code.clone())
             .unwrap_or_default()
     });
-    let mut description =
-        use_signal(|| eval_type.as_ref().and_then(|item| item.description.clone()).unwrap_or_default());
+    let mut description = use_signal(|| {
+        eval_type
+            .as_ref()
+            .and_then(|item| item.description.clone())
+            .unwrap_or_default()
+    });
     let mut saving = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 

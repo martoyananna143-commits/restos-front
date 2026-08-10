@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 
-use crate::components::{AiAssistantPage, CriteriaPage, CriterionSetsPage, EvaluationTypesPage, EvaluationsPage};
+use crate::components::{
+    AiAssistantPage, CriteriaPage, CriterionSetsPage, EvaluationTypesPage, EvaluationsPage,
+};
 
 #[derive(Clone, PartialEq)]
 enum Screen {

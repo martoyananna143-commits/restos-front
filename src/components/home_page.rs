@@ -2,13 +2,19 @@
 
 use dioxus::prelude::*;
 
+use super::shared::{ErrorView, LoadingView};
 use crate::api;
 use crate::auth::AuthState;
 use crate::types::{EvaluationDetail, EvaluationItem, OrgInfo};
-use super::shared::{ErrorView, LoadingView};
 
 fn score_tone(score: f64) -> &'static str {
-    if score >= 80.0 { "score-good" } else if score >= 60.0 { "score-warn" } else { "score-bad" }
+    if score >= 80.0 {
+        "score-good"
+    } else if score >= 60.0 {
+        "score-warn"
+    } else {
+        "score-bad"
+    }
 }
 
 fn format_date(value: &str) -> String {
@@ -35,9 +41,18 @@ pub fn HomePage(
     });
 
     let auth = AuthState::load();
-    let user_name = auth.as_ref().map(|state| state.name.clone()).unwrap_or_default();
-    let is_superuser = auth.as_ref().map(|state| state.is_superuser).unwrap_or(false);
-    let available_orgs: Vec<OrgInfo> = auth.as_ref().map(|state| state.available_orgs.clone()).unwrap_or_default();
+    let user_name = auth
+        .as_ref()
+        .map(|state| state.name.clone())
+        .unwrap_or_default();
+    let is_superuser = auth
+        .as_ref()
+        .map(|state| state.is_superuser)
+        .unwrap_or(false);
+    let available_orgs: Vec<OrgInfo> = auth
+        .as_ref()
+        .map(|state| state.available_orgs.clone())
+        .unwrap_or_default();
     let current_org_id = auth.as_ref().map(|state| state.org_id).unwrap_or_default();
     let current_org_name = available_orgs
         .iter()
@@ -56,13 +71,21 @@ pub fn HomePage(
             let is_personal_view = !can_use_evaluations;
             let mut completed: Vec<EvaluationItem> = evaluations
                 .into_iter()
-                .filter(|item| item.status.as_deref() == Some("completed") && item.score_percentage.is_some())
+                .filter(|item| {
+                    item.status.as_deref() == Some("completed") && item.score_percentage.is_some()
+                })
                 .collect();
             completed.sort_by(|left, right| right.created_at.cmp(&left.created_at));
             let average = if completed.is_empty() {
                 None
             } else {
-                Some(completed.iter().filter_map(|item| item.score_percentage).sum::<f64>() / completed.len() as f64)
+                Some(
+                    completed
+                        .iter()
+                        .filter_map(|item| item.score_percentage)
+                        .sum::<f64>()
+                        / completed.len() as f64,
+                )
             };
 
             rsx! {
@@ -230,8 +253,14 @@ fn ScoreRing(value: Option<f64>, is_personal: bool) -> Element {
     let shown = value.map(|score| score.clamp(0.0, 100.0));
     let offset = 339.292 - shown.unwrap_or(0.0) * 3.39292;
     let tone = shown.map(score_tone).unwrap_or("score-neutral");
-    let label = shown.map(|score| format!("{score:.1}%")).unwrap_or_else(|| "—".to_string());
-    let subject = if is_personal { "Мой средний показатель" } else { "Средний показатель по заведению" };
+    let label = shown
+        .map(|score| format!("{score:.1}%"))
+        .unwrap_or_else(|| "—".to_string());
+    let subject = if is_personal {
+        "Мой средний показатель"
+    } else {
+        "Средний показатель по заведению"
+    };
     let aria = shown
         .map(|score| format!("{subject}: {score:.1} процента"))
         .unwrap_or_else(|| format!("{subject} недоступен: завершённых замеров нет"));
@@ -268,13 +297,21 @@ fn CompletedMeasurementRow(token: String, item: EvaluationItem) -> Element {
     });
     let score = item.score_percentage.unwrap_or_default();
     let tone = score_tone(score);
-    let employee_name = item.evaluated_employee_name.clone().unwrap_or_else(|| "Сотрудник".to_string());
+    let employee_name = item
+        .evaluated_employee_name
+        .clone()
+        .unwrap_or_else(|| "Сотрудник".to_string());
     let employee_initials = initials(&employee_name);
     let created_at = item.created_at.clone();
     let created_label = format_date(&created_at);
-    let fallback_type = item.evaluation_type_name.clone().unwrap_or_else(|| "—".to_string());
+    let fallback_type = item
+        .evaluation_type_name
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
     let detail_content = match detail() {
-        None => rsx! { div { class: "measurement-meta measurement-meta--loading", "Загрузка деталей…" } },
+        None => {
+            rsx! { div { class: "measurement-meta measurement-meta--loading", "Загрузка деталей…" } }
+        }
         Some(Ok(info)) => rsx! { MeasurementMeta { detail: info } },
         Some(Err(_)) => rsx! {
             div { class: "measurement-meta",
@@ -302,7 +339,10 @@ fn CompletedMeasurementRow(token: String, item: EvaluationItem) -> Element {
 
 #[component]
 fn MeasurementMeta(detail: EvaluationDetail) -> Element {
-    let template = detail.criterion_set_name.clone().unwrap_or_else(|| "—".to_string());
+    let template = detail
+        .criterion_set_name
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
     rsx! {
         div { class: "measurement-meta",
             span { small { "Тип" } strong { "{detail.evaluation_type_name}" } }
@@ -313,7 +353,9 @@ fn MeasurementMeta(detail: EvaluationDetail) -> Element {
 }
 
 fn initials(name: &str) -> String {
-    let mut parts = name.split_whitespace().filter_map(|part| part.chars().next());
+    let mut parts = name
+        .split_whitespace()
+        .filter_map(|part| part.chars().next());
     match (parts.next(), parts.next()) {
         (Some(first), Some(second)) => format!("{first}{second}").to_uppercase(),
         (Some(first), None) => first.to_uppercase().to_string(),

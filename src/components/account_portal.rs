@@ -20,7 +20,7 @@ use crate::{
 use super::{
     account_legal_notice::{AccountLegalContext, AccountLegalNotice},
     bootstrap_owner_capability, capability_from_probe, AssessmentAttemptsPage,
-    AssessmentManagementPage, AssessmentsPage, ManagerCapability,
+    AssessmentManagementPage, AssessmentsPage, ManagerCapability, WorkforceOnboardingPage,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,6 +544,7 @@ pub fn InvitationAccountAuthPage(
 enum AccountPilotTab {
     MyAssessments,
     Assessments,
+    Team,
     Management,
     Security,
 }
@@ -627,7 +628,9 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
             })
             .unwrap_or(ManagerCapability::Checking)
     };
-    if tab() == AccountPilotTab::Management && manager_capability != ManagerCapability::Authorized {
+    if matches!(tab(), AccountPilotTab::Management | AccountPilotTab::Team)
+        && manager_capability != ManagerCapability::Authorized
+    {
         tab.set(AccountPilotTab::MyAssessments);
     }
 
@@ -639,6 +642,7 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                     button { class: if tab() == AccountPilotTab::MyAssessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::MyAssessments), "Мои оценки" }
                     button { class: if tab() == AccountPilotTab::Assessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Assessments), "Шаблоны" }
                     if manager_capability == ManagerCapability::Authorized {
+                        button { class: if tab() == AccountPilotTab::Team { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Team), "Команда" }
                         button { class: if tab() == AccountPilotTab::Management { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Management), "Назначения" }
                     }
                     button { class: if tab() == AccountPilotTab::Security { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Security), "Безопасность" }
@@ -666,6 +670,7 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                 match tab() {
                     AccountPilotTab::MyAssessments => rsx! { AssessmentAttemptsPage {} },
                     AccountPilotTab::Assessments => rsx! { AssessmentsPage {} },
+                    AccountPilotTab::Team => rsx! { WorkforceOnboardingPage {} },
                     AccountPilotTab::Management => rsx! {
                         AssessmentManagementPage {
                             on_company_changed: move |_| {

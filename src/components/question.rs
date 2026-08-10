@@ -1,14 +1,14 @@
 //! Single question card — styled for step-by-step evaluation flow.
 
-use dioxus::prelude::*;
-use crate::types::{AnswerValue, Criterion};
 use super::inputs::{BooleanInput, CommentInput, NumberInput, TextInput};
+use crate::types::{AnswerValue, Criterion};
+use dioxus::prelude::*;
 
 /// Per-question answer state — kept in the parent's Vec<QuestionState>.
 #[derive(Clone, PartialEq)]
 pub struct QuestionState {
     pub criterion_id: i64,
-    pub value:   Signal<Option<AnswerValue>>,
+    pub value: Signal<Option<AnswerValue>>,
     pub comment: Signal<Option<String>>,
 }
 
@@ -16,19 +16,19 @@ impl QuestionState {
     pub fn new(criterion_id: i64) -> Self {
         Self {
             criterion_id,
-            value:   Signal::new(None),
+            value: Signal::new(None),
             comment: Signal::new(None),
         }
     }
 
     pub fn with_values(
         criterion_id: i64,
-        value:   Option<AnswerValue>,
+        value: Option<AnswerValue>,
         comment: Option<String>,
     ) -> Self {
         Self {
             criterion_id,
-            value:   Signal::new(value),
+            value: Signal::new(value),
             comment: Signal::new(comment),
         }
     }
@@ -49,12 +49,12 @@ pub fn QuestionCard(
     disabled: bool,
 ) -> Element {
     let is_boolean = criterion.value_type == "boolean";
-    let is_number  = criterion.value_type == "number";
+    let is_number = criterion.value_type == "number";
 
     let initial = (state.value)();
     let init_bool = initial.clone();
-    let init_num  = initial.clone();
-    let init_str  = initial;
+    let init_num = initial.clone();
+    let init_str = initial;
 
     let bool_val: Signal<Option<bool>> = use_signal(move || match &init_bool {
         Some(AnswerValue::Boolean(b)) => Some(*b),
@@ -81,9 +81,13 @@ pub fn QuestionCard(
         state.value.set(val);
     });
 
-    let type_badge = if is_boolean { "Да / Нет" }
-                     else if is_number { "Числовая" }
-                     else { "Текст" };
+    let type_badge = if is_boolean {
+        "Да / Нет"
+    } else if is_number {
+        "Числовая"
+    } else {
+        "Текст"
+    };
 
     rsx! {
         div { class: "pad", style: "margin-top:16px;",

@@ -88,8 +88,12 @@ pub struct Criterion {
     pub is_required: bool,
 }
 
-fn default_value_type() -> String { "boolean".into() }
-fn default_true() -> bool { true }
+fn default_value_type() -> String {
+    "boolean".into()
+}
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Answer {

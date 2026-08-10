@@ -1,8 +1,8 @@
 //! Analytics page
 
-use dioxus::prelude::*;
-use crate::api;
 use super::shared::{ErrorView, LoadingView};
+use crate::api;
+use dioxus::prelude::*;
 
 fn initials(name: &str) -> String {
     let parts: Vec<&str> = name.split_whitespace().collect();
@@ -13,18 +13,28 @@ fn initials(name: &str) -> String {
             "{}{}",
             a.chars().next().unwrap_or('?'),
             b.chars().next().unwrap_or('?')
-        ).to_uppercase(),
+        )
+        .to_uppercase(),
     }
 }
 
 fn av_color(name: &str) -> &'static str {
     match name.bytes().next().unwrap_or(0) % 4 {
-        0 => "av-amber", 1 => "av-blue", 2 => "av-green", _ => "av-purple",
+        0 => "av-amber",
+        1 => "av-blue",
+        2 => "av-green",
+        _ => "av-purple",
     }
 }
 
 fn score_color(s: f64) -> &'static str {
-    if s >= 80.0 { "var(--green)" } else if s >= 60.0 { "var(--amber)" } else { "var(--red)" }
+    if s >= 80.0 {
+        "var(--green)"
+    } else if s >= 60.0 {
+        "var(--amber)"
+    } else {
+        "var(--red)"
+    }
 }
 
 #[component]
