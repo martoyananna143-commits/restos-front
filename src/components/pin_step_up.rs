@@ -23,7 +23,7 @@ pub fn PinStepUpScreen(token: String, on_success: EventHandler<AuthState>) -> El
                     "Введите 6-значный PIN. Пароль входа остаётся прежним — PIN нужен как второй фактор и периодически после долгого перерыва."
                 }
                 if let Some(msg) = err() {
-                    div { class: "error-msg", style: "margin-bottom:12px;", "{msg}" }
+                    div { class: "error-msg", role: "alert", style: "margin-bottom:12px;", "{msg}" }
                 }
                 div { class: "form-field",
                     label { class: "field-label", "PIN-код" }

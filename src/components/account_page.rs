@@ -81,7 +81,7 @@ pub fn AccountPage(
                                 }
 
                                 if let Some(err) = form_error() {
-                                    div { class: "error-msg", style: "margin-bottom:10px;", "{err}" }
+                                    div { class: "error-msg", role: "alert", style: "margin-bottom:10px;", "{err}" }
                                 }
                                 if let Some(ok) = form_ok() {
                                     div { class: "card card-green", style: "padding:10px 14px; margin-bottom:10px; font-size:13px;",

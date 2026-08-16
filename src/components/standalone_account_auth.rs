@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use uuid::Uuid;
+use wasm_bindgen::JsCast;
 
 use crate::{
     account_api::{
@@ -22,6 +23,7 @@ use super::{
         PasswordRecoverySmsLegalControl, RegistrationSmsLegalControls,
     },
     account_portal::{safe_account_error, safe_passkey_error, InvitationAccountAuthPage},
+    russian_phone_input::{canonical_russian_phone, russian_phone_is_complete, RussianPhoneInput},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,11 +38,6 @@ enum Mode {
     ResetOtp,
     ResetPassword,
     Invitation,
-}
-
-pub(crate) fn phone_is_plausible(value: &str) -> bool {
-    let digits = value.chars().filter(char::is_ascii_digit).count();
-    (10..=15).contains(&digits) && value.len() <= 32
 }
 
 fn password_is_valid(value: &str) -> bool {
@@ -77,6 +74,21 @@ fn generic_login_error(error: &AccountApiError) -> &'static str {
         | AccountApiError::InvalidRequest => "Неверный номер телефона или пароль.",
         _ => safe_account_error(error),
     }
+}
+
+fn focus_auth_field(id: &'static str) {
+    spawn(async move {
+        TimeoutFuture::new(0).await;
+        let Some(element) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+        else {
+            return;
+        };
+        if let Ok(element) = element.dyn_into::<web_sys::HtmlElement>() {
+            let _ = element.focus();
+        }
+    });
 }
 
 fn arm_resend_timer(
@@ -121,6 +133,9 @@ pub fn AccountAuthPage(
     let mut status: Signal<Option<String>> = use_signal(|| None);
     let mut phone = use_signal(String::new);
     let mut password = use_signal(String::new);
+    let mut password_visible = use_signal(|| false);
+    let mut login_phone_invalid = use_signal(|| false);
+    let mut login_password_invalid = use_signal(|| false);
     let mut display_name = use_signal(String::new);
     let mut company_name = use_signal(String::new);
     let mut venue_name = use_signal(String::new);
@@ -139,6 +154,9 @@ pub fn AccountAuthPage(
         status.set(None);
         phone.set(String::new());
         password.set(String::new());
+        password_visible.set(false);
+        login_phone_invalid.set(false);
+        login_password_invalid.set(false);
         display_name.set(String::new());
         company_name.set(String::new());
         venue_name.set(String::new());
@@ -173,13 +191,23 @@ pub fn AccountAuthPage(
 
     rsx! {
         div { class: "auth-root account-auth-root",
-            div { class: "auth-card account-auth-card",
+            div { class: "account-auth-shell",
+                aside { class: "account-auth-brand", aria_hidden: "true",
+                    div { class: "account-auth-brand__mark" }
+                    div {
+                        strong { "RestOS" }
+                        span { "Операционная система ресторана" }
+                    }
+                }
+                div { class: "auth-card account-auth-card",
                 div { class: "auth-header",
+                    img { class: "account-auth-mark", src: "/icons/icon-192.png", alt: "" }
                     div { class: "auth-title", "RestOS" }
                     h1 { class: "account-auth-heading", "{heading}" }
                     p { class: "auth-subtitle", "Безопасный вход в рабочий аккаунт RestOS." }
                 }
-                div { class: "account-live", role: "status", aria_live: "polite",
+                div { id: "account-auth-feedback", tabindex: "-1", class: if error().is_some() { "account-live account-live--error semantic-error-surface" } else if status().is_some() { "account-live account-live--success" } else { "account-live" }, role: if error().is_some() { "alert" } else { "status" }, aria_live: if error().is_some() { "assertive" } else { "polite" },
+                    if error().is_some() { span { class: "account-live__icon", aria_hidden: "true", "!" } }
                     if let Some(message) = error() { "{message}" }
                     if let Some(message) = status() { "{message}" }
                 }
@@ -191,32 +219,61 @@ pub fn AccountAuthPage(
                         let login_session = session.clone();
                         let login_passkeys = passkeys.clone();
                         let passkey_session = session.clone();
-                        rsx! { div { class: "auth-form",
-                            div { class: "form-field",
-                                label { class: "field-label", r#for: "standalone-login-phone", "Номер телефона" }
-                                input { id: "standalone-login-phone", class: "field-input", r#type: "tel", autocomplete: "tel", value: "{phone}", oninput: move |event| phone.set(event.value()) }
+                        rsx! { form { class: "auth-form account-login-form", aria_busy: busy(),
+                            onsubmit: move |event| {
+                                event.prevent_default();
+                                if busy() { return; }
+                                let phone_invalid = !russian_phone_is_complete(&phone());
+                                let password_invalid = password().is_empty();
+                                login_phone_invalid.set(phone_invalid);
+                                login_password_invalid.set(password_invalid);
+                                if phone_invalid || password_invalid {
+                                    error.set(Some("Проверьте номер телефона и пароль.".into()));
+                                    focus_auth_field(if phone_invalid { "standalone-login-phone" } else { "standalone-login-password" });
+                                    return;
+                                }
+                                busy.set(true); error.set(None); generation += 1;
+                                let current_generation = generation();
+                                let api = login_api.clone(); let identities = login_identities.clone(); let session = login_session.clone();
+                                let Some(canonical_phone) = canonical_russian_phone(&phone()) else { return; };
+                                let request = PasswordLoginInput { phone: canonical_phone, password: password(), platform: "web".into(), device_display_name: Some("Браузер RestOS".into()) };
+                                spawn(async move {
+                                    let result = api.password_login(&identities, &request).await;
+                                    if generation() != current_generation { return; }
+                                    busy.set(false);
+                                    match result {
+                                        Ok(registered) => { password.set(String::new()); session.accept_registered_session(registered); on_authenticated.call(()); },
+                                        Err(problem) => {
+                                            login_phone_invalid.set(true);
+                                            login_password_invalid.set(true);
+                                            error.set(Some(generic_login_error(&problem).into()));
+                                            focus_auth_field("account-auth-feedback");
+                                        }
+                                    }
+                                });
+                            },
+                            RussianPhoneInput {
+                                id: "standalone-login-phone".to_string(),
+                                label: "Номер телефона".to_string(),
+                                value: phone(),
+                                invalid: login_phone_invalid(),
+                                disabled: busy(),
+                                described_by: if login_phone_invalid() { "account-auth-feedback".to_string() } else { String::new() },
+                                on_change: move |digits| { phone.set(digits); login_phone_invalid.set(false); error.set(None); }
                             }
                             div { class: "form-field",
                                 label { class: "field-label", r#for: "standalone-login-password", "Пароль" }
-                                input { id: "standalone-login-password", class: "field-input", r#type: "password", autocomplete: "current-password", maxlength: "72", value: "{password}", oninput: move |event| password.set(event.value()) }
+                                div { class: "account-password-field",
+                                    input { id: "standalone-login-password", class: "field-input", r#type: if password_visible() { "text" } else { "password" }, autocomplete: "current-password", maxlength: "72", value: "{password}", aria_invalid: login_password_invalid(), aria_describedby: if login_password_invalid() { "account-auth-feedback" } else { "" }, oninput: move |event| { password.set(event.value()); login_password_invalid.set(false); } }
+                                    button { class: "account-password-toggle", r#type: "button", aria_label: if password_visible() { "Скрыть пароль" } else { "Показать пароль" }, aria_pressed: password_visible(), onclick: move |_| password_visible.set(!password_visible()),
+                                        if password_visible() { "Скрыть" } else { "Показать" }
+                                    }
+                                }
                             }
-                            button { class: "btn-primary w-full", r#type: "button", disabled: busy(),
-                                onclick: move |_| {
-                                    if busy() || !phone_is_plausible(&phone()) || password().is_empty() { error.set(Some("Проверьте номер телефона и пароль.".into())); return; }
-                                    busy.set(true); error.set(None); generation += 1;
-                                    let current_generation = generation();
-                                    let api = login_api.clone(); let identities = login_identities.clone(); let session = login_session.clone();
-                                    let request = PasswordLoginInput { phone: phone(), password: password(), platform: "web".into(), device_display_name: Some("Браузер RestOS".into()) };
-                                    spawn(async move {
-                                        let result = api.password_login(&identities, &request).await;
-                                        if generation() != current_generation { return; }
-                                        busy.set(false); password.set(String::new());
-                                        match result { Ok(registered) => { session.accept_registered_session(registered); on_authenticated.call(()); }, Err(problem) => error.set(Some(generic_login_error(&problem).into())) }
-                                    });
-                                },
+                            button { class: "btn-primary w-full", r#type: "submit", disabled: busy() || !russian_phone_is_complete(&phone()),
                                 if busy() { "Вход..." } else { "Войти" }
                             }
-                            button { class: "btn-secondary w-full", r#type: "button", disabled: busy(),
+                            button { class: "btn-secondary w-full account-passkey-action", r#type: "button", disabled: busy(),
                                 onclick: move |_| {
                                     if busy() { return; }
                                     error.set(None);
@@ -232,10 +289,14 @@ pub fn AccountAuthPage(
                                 },
                                 "Войти с Face ID или ключом доступа"
                             }
-                            button { class: "btn-ghost account-auth-link", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::ResetPhone), "Забыли пароль?" }
-                            button { class: "btn-ghost account-auth-link", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::RegistrationPhone), "Создать аккаунт" }
-                            button { class: "btn-ghost account-auth-link", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::Invitation), "Регистрация по приглашению" }
-                            button { class: "btn-ghost account-auth-link", r#type: "button", onclick: move |_| on_legacy_login.call(()), "Старый вход для существующей версии" }
+                            button { class: "account-text-action", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::ResetPhone), "Забыли пароль?" }
+                            div { class: "account-auth-separator", aria_hidden: "true" }
+                            button { class: "btn-secondary w-full account-create-action", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::RegistrationPhone), "Создать аккаунт" }
+                            button { class: "account-text-action", r#type: "button", disabled: busy(), onclick: move |_| reset_flow(Mode::Invitation), "Регистрация по приглашению" }
+                            details { class: "account-auth-disclosure",
+                                summary { "Другие способы входа" }
+                                button { class: "account-text-action", r#type: "button", onclick: move |_| on_legacy_login.call(()), "Старый вход для существующей версии" }
+                            }
                             AccountLegalNotice { context: AccountLegalContext::Login }
                         } }
                     },
@@ -243,9 +304,14 @@ pub fn AccountAuthPage(
                         let request_api = api.clone();
                         let is_registration = mode() == Mode::RegistrationPhone;
                         rsx! { div { class: "auth-form",
-                            div { class: "form-field",
-                                label { class: "field-label", r#for: "standalone-phone", "Номер телефона" }
-                                input { id: "standalone-phone", class: "field-input", r#type: "tel", autocomplete: "tel", value: "{phone}", oninput: move |event| phone.set(event.value()) }
+                            RussianPhoneInput {
+                                id: "standalone-phone".to_string(),
+                                label: "Номер телефона".to_string(),
+                                value: phone(),
+                                invalid: false,
+                                disabled: busy(),
+                                described_by: String::new(),
+                                on_change: move |digits| { phone.set(digits); error.set(None); }
                             }
                             if is_registration {
                                 RegistrationSmsLegalControls { personal_data_consent, authorization_sms_consent }
@@ -253,13 +319,13 @@ pub fn AccountAuthPage(
                                 PasswordRecoverySmsLegalControl { authorization_sms_consent }
                             }
                             button { class: "btn-primary w-full", r#type: "button",
-                                disabled: busy() || if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) },
+                                disabled: busy() || !russian_phone_is_complete(&phone()) || if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) },
                                 onclick: move |_| {
-                                    if busy() || !phone_is_plausible(&phone()) { error.set(Some("Проверьте номер телефона.".into())); return; }
+                                    if busy() { return; }
+                                    let Some(request_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
                                     if if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) } { return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
                                     let api = request_api.clone();
-                                    let request_phone = phone();
                                     personal_data_consent.set(false);
                                     authorization_sms_consent.set(false);
                                     spawn(async move {
@@ -274,6 +340,12 @@ pub fn AccountAuthPage(
                                     });
                                 },
                                 if busy() { "Отправка..." } else { "Получить код" }
+                            }
+                            if if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) } {
+                                p { class: "account-auth-disabled-reason", role: "status",
+                                    if is_registration { "Подтвердите оба согласия, чтобы получить код." }
+                                    else { "Подтвердите согласие на сервисное SMS, чтобы получить код." }
+                                }
                             }
                             button { class: "btn-ghost account-auth-link", r#type: "button", onclick: move |_| reset_flow(Mode::Login), "Назад ко входу" }
                         } }
@@ -292,7 +364,8 @@ pub fn AccountAuthPage(
                                     let Some(challenge_id) = challenge() else { error.set(Some("Запросите новый код.".into())); return; };
                                     if busy() { return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
-                                    let api = verify_api.clone(); let request = StandaloneSmsVerifyInput { challenge_id, phone: phone(), code: otp() };
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
+                                    let api = verify_api.clone(); let request = StandaloneSmsVerifyInput { challenge_id, phone: canonical_phone, code: otp() };
                                     spawn(async move {
                                         let result = if is_registration { api.verify_registration_sms(&request).await } else { api.verify_password_reset_sms(&request).await };
                                         if generation() != current_generation { return; }
@@ -311,7 +384,8 @@ pub fn AccountAuthPage(
                                 onclick: move |_| {
                                     if busy() || !resend_ready() || if is_registration { !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) } else { !password_recovery_sms_request_allowed(authorization_sms_consent()) } { return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
-                                    let api = resend_api.clone(); let request_phone = phone();
+                                    let Some(request_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
+                                    let api = resend_api.clone();
                                     personal_data_consent.set(false); authorization_sms_consent.set(false);
                                     spawn(async move {
                                         let result = if is_registration {
@@ -342,7 +416,8 @@ pub fn AccountAuthPage(
                                     if busy() || display_name().trim().is_empty() || !password_is_valid(&password()) { error.set(Some("Проверьте имя и длину пароля.".into())); return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
                                     let api = register_api.clone(); let identities = register_identities.clone(); let session = register_session.clone();
-                                    let request = StandaloneRegistrationInput { phone_verification_challenge_id: challenge_id, phone: phone(), display_name: display_name().trim().into(), password: password(), platform: "web".into(), device_display_name: Some("Браузер RestOS".into()) };
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
+                                    let request = StandaloneRegistrationInput { phone_verification_challenge_id: challenge_id, phone: canonical_phone, display_name: display_name().trim().into(), password: password(), platform: "web".into(), device_display_name: Some("Браузер RestOS".into()) };
                                     spawn(async move {
                                         let result = api.register_standalone(&identities, &request).await;
                                         if generation() != current_generation { return; }
@@ -363,7 +438,13 @@ pub fn AccountAuthPage(
                                 "Создать организацию"
                             }
                             button { class: "btn-secondary w-full", r#type: "button", disabled: busy(),
-                                onclick: move |_| reset_flow(Mode::Invitation),
+                                onclick: move |_| {
+                                    if super::join_organization::group_invitation_token().is_some() {
+                                        on_authenticated.call(());
+                                    } else {
+                                        reset_flow(Mode::Invitation);
+                                    }
+                                },
                                 "У меня есть приглашение"
                             }
                             p { class: "account-auth-help", "Ключ доступа позволит входить с Face ID, Touch ID или кодом устройства." }
@@ -434,7 +515,8 @@ pub fn AccountAuthPage(
                                     let Some(challenge_id) = challenge() else { error.set(Some("Запросите новый код.".into())); return; };
                                     if busy() || !password_is_valid(&password()) { error.set(Some("Пароль должен содержать от 12 до 72 байт.".into())); return; }
                                     busy.set(true); error.set(None); generation += 1; let current_generation = generation();
-                                    let api = reset_api.clone(); let request = PasswordResetCompleteInput { challenge_id, phone: phone(), new_password: password() };
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
+                                    let api = reset_api.clone(); let request = PasswordResetCompleteInput { challenge_id, phone: canonical_phone, new_password: password() };
                                     spawn(async move {
                                         let result = api.complete_password_reset(&request).await;
                                         if generation() != current_generation { return; }
@@ -448,6 +530,7 @@ pub fn AccountAuthPage(
                         } }
                     },
                     Mode::Invitation => rsx! {},
+                }
                 }
             }
         }
@@ -470,8 +553,8 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn phone_and_password_bounds_fail_closed() {
-        assert!(phone_is_plausible("8 (999) 123-45-67"));
-        assert!(!phone_is_plausible("123"));
+        assert!(russian_phone_is_complete("8 (999) 123-45-67"));
+        assert!(!russian_phone_is_complete("123"));
         assert!(password_is_valid("correct horse"));
         assert!(!password_is_valid("short"));
         assert!(!password_is_valid(&"x".repeat(73)));
@@ -501,5 +584,63 @@ mod tests {
         let present = company_onboarding_input("RestOS", " Первый ресторан ").unwrap();
         assert_eq!(present.venue_name.as_deref(), Some("Первый ресторан"));
         assert!(company_onboarding_input("", "Venue").is_none());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn login_uses_one_submit_primary_and_preserves_all_routes() {
+        let source = include_str!("standalone_account_auth.rs");
+        let login = source
+            .split_once("Mode::Login => {")
+            .and_then(|(_, source)| source.split_once("Mode::RegistrationPhone | Mode::ResetPhone"))
+            .map(|(source, _)| source)
+            .unwrap_or_default();
+
+        assert_eq!(login.matches("class: \"btn-primary w-full\"").count(), 1);
+        assert!(login.contains("r#type: \"submit\""));
+        assert!(login.contains("onsubmit:"));
+        assert!(login.contains("if busy() { return; }"));
+        assert!(login.contains("Войти с Face ID или ключом доступа"));
+        assert!(login.contains("Забыли пароль?"));
+        assert!(login.contains("Создать аккаунт"));
+        assert!(login.contains("Регистрация по приглашению"));
+        assert!(login.contains("Другие способы входа"));
+        assert!(login.contains("Старый вход для существующей версии"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn login_fields_have_native_input_and_accessibility_contracts() {
+        let source = include_str!("standalone_account_auth.rs");
+        let shared_phone = include_str!("russian_phone_input.rs");
+        assert!(source.contains("RussianPhoneInput {"));
+        assert!(shared_phone.contains("inputmode: \"tel\""));
+        assert!(shared_phone.contains("autocomplete: \"tel\""));
+        assert!(source.contains("autocomplete: \"current-password\""));
+        assert!(source.contains("aria_label: if password_visible()"));
+        assert!(source.contains("\"Показать пароль\""));
+        assert!(source.contains("\"Скрыть пароль\""));
+        assert!(source.contains("invalid: login_phone_invalid()"));
+        assert!(source.contains("aria_invalid: login_password_invalid()"));
+        assert!(source.contains("described_by: if login_phone_invalid()"));
+        assert!(source.contains("focus_auth_field"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn auth_layout_uses_responsive_split_without_new_security_state() {
+        let source = include_str!("standalone_account_auth.rs")
+            .split_once("pub fn AccountAuthPage")
+            .and_then(|(_, source)| source.split_once("#[cfg(test)]"))
+            .map(|(source, _)| source)
+            .unwrap_or_default();
+        let css = include_str!("../../assets/styling/brand_foundation.css");
+        assert!(source.contains("class: \"account-auth-shell\""));
+        assert!(source.contains("class: \"account-auth-brand__mark\""));
+        assert!(css.contains("grid-template-columns: minmax(0, 1.05fr) minmax(400px, 440px)"));
+        assert!(css.contains("width: min(1120px, 100%)"));
+        assert!(css.contains(".account-auth-brand { display: none; }"));
+        assert!(!source.contains("localStorage"));
+        assert!(!source.contains("sessionStorage"));
     }
 }

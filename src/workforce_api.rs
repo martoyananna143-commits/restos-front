@@ -46,6 +46,18 @@ pub struct WorkforceInvitationResponse {
     pub expires_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptWorkforceInvitationRequest {
+    pub invitation_code: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptWorkforceInvitationResponse {
+    pub joined: bool,
+}
+
 #[derive(Deserialize)]
 struct ErrorEnvelope {
     detail: ErrorDetail,
@@ -71,11 +83,31 @@ impl WorkforceApiClient {
     }
 
     #[allow(dead_code)]
-    pub const fn routes() -> [&'static str; 2] {
+    pub const fn routes() -> [&'static str; 3] {
         [
             "/api/v1/account/companies/{company_id}/workforce/venues",
             "/api/v1/account/companies/{company_id}/workforce/invitations",
+            "/api/v1/account/workforce/invitations/accept",
         ]
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn accept_invitation(
+        &self,
+        token: &AccountAccessToken,
+        body: &AcceptWorkforceInvitationRequest,
+    ) -> Result<AcceptWorkforceInvitationResponse, WorkforceApiError> {
+        let request = self
+            .authenticated_request(
+                Request::post(&format!(
+                    "{}/api/v1/account/workforce/invitations/accept",
+                    self.base_url
+                )),
+                token,
+            )
+            .json(body)
+            .map_err(|_| WorkforceApiError::InvalidRequest)?;
+        self.decode(request.send().await).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -158,7 +190,9 @@ impl WorkforceApiClient {
         Err(match (status, code.as_deref()) {
             (401, _) => WorkforceApiError::AuthenticationRequired,
             (403, Some("permission_denied")) => WorkforceApiError::PermissionDenied,
-            (409, Some("workforce_invitation_conflict")) => WorkforceApiError::Conflict,
+            (409, Some("workforce_invitation_conflict" | "invitation_conflict")) => {
+                WorkforceApiError::Conflict
+            }
             (422, Some("invalid_workforce_invitation")) => WorkforceApiError::InvalidRequest,
             (400..=499, _) => WorkforceApiError::InvalidRequest,
             _ => WorkforceApiError::InternalError,
@@ -211,6 +245,8 @@ const record = (body) => {{
     payload = JSON.stringify({{detail: {{code: "authentication_required", private: "must-not-escape"}}}});
   }} else if (request.method === "GET") {{
     payload = JSON.stringify([{{venue_id: "00000000-0000-0000-0000-000000000002", name: "Synthetic Venue"}}]);
+  }} else if (request.url.endsWith("/accept")) {{
+    payload = JSON.stringify({{joined: true}});
   }} else {{
     payload = JSON.stringify({{
       created: true,
@@ -257,7 +293,7 @@ return request.method === "GET"
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn routes_are_exact_and_account_only() {
         let routes = WorkforceApiClient::routes();
-        assert_eq!(routes.len(), 2);
+        assert_eq!(routes.len(), 3);
         assert!(routes
             .iter()
             .all(|path| path.starts_with("/api/v1/account/")));
@@ -301,15 +337,25 @@ return request.method === "GET"
                 },
             )
             .await;
+        let joined = client
+            .accept_invitation(
+                &token,
+                &AcceptWorkforceInvitationRequest {
+                    invitation_code: "123456".into(),
+                },
+            )
+            .await;
         let evidence = request_evidence();
         drop(guard);
 
         assert_eq!(venues.unwrap().len(), 1);
         assert!(invitation.unwrap().created);
+        assert!(joined.unwrap().joined);
         let requests = evidence.as_array().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         assert_eq!(requests[0]["method"], "GET");
         assert_eq!(requests[1]["method"], "POST");
+        assert_eq!(requests[2]["method"], "POST");
         for request in requests {
             assert_eq!(request["authorization"], "Bearer synthetic-token");
             assert_ne!(request["authorization"], "synthetic-token");
@@ -322,11 +368,13 @@ return request.method === "GET"
         }
         assert_eq!(requests[0]["bodyHasPhoneField"], false);
         assert_eq!(requests[1]["bodyHasPhoneField"], true);
+        assert_eq!(requests[2]["bodyHasPhoneField"], false);
         assert!(requests[0]["url"].as_str().unwrap().ends_with("/venues"));
         assert!(requests[1]["url"]
             .as_str()
             .unwrap()
             .ends_with("/invitations"));
+        assert!(requests[2]["url"].as_str().unwrap().ends_with("/accept"));
     }
 
     #[cfg(target_arch = "wasm32")]

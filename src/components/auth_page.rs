@@ -33,9 +33,9 @@ pub fn AuthPage(on_auth: EventHandler<AuthState>) -> Element {
 
     rsx! {
         div {
-            class: "auth-root",
+            class: "auth-root account-auth-root",
             div {
-                class: "auth-card",
+                class: "auth-card account-auth-card",
                 // Header
                 div {
                     class: "auth-header",
@@ -130,7 +130,7 @@ fn LoginForm(on_auth: EventHandler<AuthState>) -> Element {
                 }
             }
             if let Some(err) = error.read().as_ref() {
-                div { class: "error-msg", "{err}" }
+                div { class: "error-msg", role: "alert", "{err}" }
             }
             button {
                 class: "btn-primary w-full",
@@ -303,7 +303,7 @@ fn RegisterForm(on_auth: EventHandler<AuthState>) -> Element {
                 }
             }
             if let Some(err) = error.read().as_ref() {
-                div { class: "error-msg", "{err}" }
+                div { class: "error-msg", role: "alert", "{err}" }
             }
             button {
                 class: "btn-primary w-full",

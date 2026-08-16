@@ -6,11 +6,14 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{
     account_session::{AccountSessionAdapter, AccountSessionState},
-    components::standalone_account_auth::phone_is_plausible,
     workforce_api::{
         CreateWorkforceInvitationRequest, WorkforceApiClient, WorkforceApiError,
         WorkforceInvitationResponse,
     },
+};
+
+use super::russian_phone_input::{
+    canonical_russian_phone, russian_phone_is_complete, RussianPhoneInput,
 };
 
 fn normalized_employee_name(value: &str) -> Option<String> {
@@ -20,7 +23,7 @@ fn normalized_employee_name(value: &str) -> Option<String> {
 
 fn create_is_admitted(name: &str, phone: &str, in_flight: bool, read_only: bool) -> bool {
     normalized_employee_name(name).is_some()
-        && phone_is_plausible(phone)
+        && russian_phone_is_complete(phone)
         && !in_flight
         && !read_only
 }
@@ -143,22 +146,21 @@ pub fn WorkforceOnboardingPage() -> Element {
                             }
                         }
                     }
-                    div { class: "form-field",
-                        label { class: "field-label", r#for: "workforce-phone", "Номер телефона сотрудника" }
-                        input {
-                            id: "workforce-phone", class: "field-input", r#type: "tel",
-                            inputmode: "tel", autocomplete: "tel", maxlength: "32", required: true,
-                            aria_describedby: "workforce-phone-help",
-                            value: "{employee_phone}", disabled: creating() || read_only,
-                            oninput: move |event| {
-                                employee_phone.set(event.value());
-                                request_id.set(None);
-                                error.set(None);
-                            }
+                    RussianPhoneInput {
+                        id: "workforce-phone".to_string(),
+                        label: "Номер телефона сотрудника".to_string(),
+                        value: employee_phone(),
+                        invalid: false,
+                        disabled: creating() || read_only,
+                        described_by: "workforce-phone-help".to_string(),
+                        on_change: move |digits| {
+                            employee_phone.set(digits);
+                            request_id.set(None);
+                            error.set(None);
                         }
-                        p { id: "workforce-phone-help", class: "account-auth-help",
-                            "Код подтверждения будет отправлен на указанный номер."
-                        }
+                    }
+                    p { id: "workforce-phone-help", class: "account-auth-help",
+                        "Код подтверждения будет отправлен на указанный номер."
                     }
                     match venues() {
                         None => rsx! { p { class: "account-auth-help", "Загрузка объектов..." } },
@@ -191,8 +193,7 @@ pub fn WorkforceOnboardingPage() -> Element {
                         disabled: !create_is_admitted(&employee_name(), &employee_phone(), creating(), read_only),
                         onclick: move |_| {
                             let Some(name) = normalized_employee_name(&employee_name()) else { return; };
-                            let phone = employee_phone();
-                            if !phone_is_plausible(&phone) { return; }
+                            let Some(phone) = canonical_russian_phone(&employee_phone()) else { return; };
                             let Some((token, company_id)) = current_scope(&create_session) else {
                                 error.set(Some("Сессия недоступна. Войдите снова.".into()));
                                 return;
@@ -264,11 +265,11 @@ mod tests {
     fn admission_is_explicit_and_single_flight() {
         assert!(create_is_admitted(
             "Synthetic Employee",
-            "+79991234567",
+            "9991234567",
             false,
             false
         ));
-        assert!(!create_is_admitted("", "+79991234567", false, false));
+        assert!(!create_is_admitted("", "9991234567", false, false));
         assert!(!create_is_admitted(
             "Synthetic Employee",
             "123",
@@ -277,16 +278,26 @@ mod tests {
         ));
         assert!(!create_is_admitted(
             "Synthetic Employee",
-            "+79991234567",
+            "9991234567",
             true,
             false
         ));
         assert!(!create_is_admitted(
             "Synthetic Employee",
-            "+79991234567",
+            "9991234567",
             false,
             true
         ));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn workforce_uses_shared_phone_contract() {
+        assert_eq!(
+            canonical_russian_phone("+7 (999) 123-45-67").as_deref(),
+            Some("+79991234567")
+        );
+        assert!(russian_phone_is_complete("9991234567"));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

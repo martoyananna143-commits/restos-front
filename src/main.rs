@@ -17,8 +17,14 @@ mod auth;
 mod clipboard_safe;
 mod components;
 mod device_identity;
+mod navigation;
+mod operational_walkthrough_api;
+mod organization_access_api;
+mod organization_workflow_api;
 mod passkey;
 mod passkey_api;
+mod product_measurement_api;
+mod restaurant_metrics_api;
 mod retained;
 mod storage;
 mod types;
@@ -36,16 +42,22 @@ use components::nav_bar::{BrandMark, NavBar};
 use components::{
     root_after_account_logout, startup_root_state, AccountAuthPage, AccountPage, AccountPilotShell,
     AccountRootState, AiAssistantPage, AnalyticsPage, AssessmentsPage, AuthPage, EmployeesPage,
-    EvaluationForm, HomePage, InternshipsPage, PinStepUpScreen,
+    EvaluationForm, HomePage, InternshipsPage, MobileLaunchAnimation, PinStepUpScreen,
 };
 use components::{ErrorView, SessionGateSkeleton};
 use device_identity::DeviceIdentityAdapter;
+use operational_walkthrough_api::OperationalWalkthroughApiClient;
+use organization_access_api::OrganizationAccessApiClient;
+use organization_workflow_api::OrganizationWorkflowApiClient;
 use passkey::PasskeyAdapter;
 use passkey_api::PasskeyApiClient;
+use product_measurement_api::ProductMeasurementApiClient;
+use restaurant_metrics_api::RestaurantMetricsApiClient;
 use workforce_api::WorkforceApiClient;
 
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
+const BRAND_FOUNDATION_CSS: Asset = asset!("/assets/styling/brand_foundation.css");
 
 fn main() {
     install_runtime_error_guards();
@@ -98,6 +110,15 @@ fn account_api_base() -> String {
     "http://localhost:8000".to_string()
 }
 
+#[cfg(debug_assertions)]
+fn brand_foundation_proof_requested() -> bool {
+    web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+        .and_then(|params| params.get("internal-proof"))
+        .is_some_and(|value| value == "brand-foundation")
+}
+
 #[component]
 fn App() -> Element {
     let account_api = use_context_provider(|| {
@@ -123,7 +144,27 @@ fn App() -> Element {
             .expect("Assessment management API base must be valid")
     });
     use_context_provider(|| {
+        RestaurantMetricsApiClient::new(account_api_base())
+            .expect("Restaurant metrics API base must be valid")
+    });
+    use_context_provider(|| {
+        ProductMeasurementApiClient::new(account_api_base())
+            .expect("Product measurement API base must be valid")
+    });
+    use_context_provider(|| {
+        OperationalWalkthroughApiClient::new(account_api_base())
+            .expect("Operational walkthrough API base must be valid")
+    });
+    use_context_provider(|| {
         WorkforceApiClient::new(account_api_base()).expect("Workforce API base must be valid")
+    });
+    use_context_provider(|| {
+        OrganizationAccessApiClient::new(account_api_base())
+            .expect("Organization access API base must be valid")
+    });
+    use_context_provider(|| {
+        OrganizationWorkflowApiClient::new(account_api_base())
+            .expect("Organization workflow API base must be valid")
     });
     let mut auth = use_signal(|| AuthState::load());
     let mut account_root = use_signal(|| AccountRootState::BootstrappingAccount);
@@ -211,11 +252,24 @@ if (!window.__restosErrorGuardsInstalled) {
         })
     });
 
+    #[cfg(debug_assertions)]
+    if brand_foundation_proof_requested() {
+        return rsx! {
+            document::Stylesheet { href: MAIN_CSS }
+            document::Stylesheet { href: BRAND_FOUNDATION_CSS }
+            document::Meta { name: "viewport", content: "width=device-width, initial-scale=1.0, viewport-fit=cover" }
+            document::Meta { name: "color-scheme", content: "light dark" }
+            document::Title { "RestOS Brand Foundation — internal proof" }
+            components::BrandFoundationProof {}
+        };
+    }
+
     rsx! {
         document::Stylesheet { href: TAILWIND_CSS }
         document::Stylesheet { href: MAIN_CSS }
+        document::Stylesheet { href: BRAND_FOUNDATION_CSS }
         document::Meta { name: "viewport", content: "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" }
-        document::Meta { name: "theme-color", content: "#f8f5f1" }
+        document::Meta { name: "theme-color", content: "#36572C" }
         document::Meta { name: "color-scheme", content: "light" }
         // PWA / installability
         document::Meta { name: "application-name", content: "RestOS" }
@@ -225,7 +279,8 @@ if (!window.__restosErrorGuardsInstalled) {
         document::Meta { name: "apple-mobile-web-app-title", content: "RestOS" }
         document::Link { rel: "manifest", href: "/manifest.json" }
         document::Link { rel: "apple-touch-icon", href: "/icons/apple-touch-icon.png" }
-        document::Link { rel: "icon", r#type: "image/svg+xml", href: "/favicon.svg" }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: "/favicon-32x32.png" }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "16x16", href: "/favicon-16x16.png" }
         // Service worker registration
         document::Script {
             r#type: "text/javascript",
@@ -263,6 +318,7 @@ if ('serviceWorker' in navigator) {{
                 }
             }
         } else {
+            MobileLaunchAnimation {}
             match account_root() {
                 AccountRootState::BootstrappingAccount => rsx! {
                     div { class: "account-startup", role: "status", aria_live: "polite",
@@ -311,10 +367,11 @@ if ('serviceWorker' in navigator) {{
                     }
                 },
                 AccountRootState::SafeStartupError => rsx! {
-                    div { class: "auth-root",
-                        div { class: "auth-card account-startup-error",
+                    div { class: "auth-root account-auth-root",
+                        div { class: "auth-card account-auth-card account-startup-error semantic-error-surface", role: "alert",
+                            div { class: "semantic-state-icon semantic-state-icon--critical", aria_hidden: "true", "!" }
                             h1 { class: "account-auth-heading", "Не удалось проверить сессию" }
-                            p { class: "auth-subtitle", "Проверьте соединение и повторите попытку." }
+                            p { class: "auth-subtitle", "Ошибка соединения. Проверьте сеть и повторите попытку вручную." }
                             button {
                                 class: "btn-primary w-full", r#type: "button",
                                 onclick: move |_| {
@@ -430,7 +487,10 @@ fn MainShell(
                 }
                 if can_use_evaluations && is_tab_visible("evaluations", &current, &vis) {
                     div { class: "{layer_class(\"evaluations\", &current)}", style: "{layer_style(\"evaluations\", &current)}",
-                        AssessmentsPage {}
+                        AssessmentsPage {
+                            section: crate::components::AssessmentLibrarySection::Library,
+                            on_section_change: move |_| {},
+                        }
                     }
                 }
                 if is_tab_visible("analytics", &current, &vis) {

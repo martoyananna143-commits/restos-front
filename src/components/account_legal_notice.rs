@@ -35,7 +35,7 @@ pub fn RegistrationSmsLegalControls(
                 }
                 span {
                     "Я даю согласие на обработку моих персональных данных для регистрации, аутентификации и обеспечения безопасности RestOS в соответствии с "
-                    a { href: PERSONAL_DATA_URL, target: "_blank", rel: "noopener noreferrer", "Согласием на обработку персональных данных" }
+                    a { href: PERSONAL_DATA_URL, target: "_blank", rel: "noopener noreferrer", onclick: move |event| event.stop_propagation(), "Согласием на обработку персональных данных" }
                     "."
                 }
             }

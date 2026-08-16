@@ -1,8 +1,13 @@
 //! Minimal Account-only pilot UI. It never accepts or creates legacy auth state.
 
+use std::{collections::HashSet, rc::Rc};
+
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use uuid::Uuid;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{closure::Closure, JsCast};
 
 use crate::{
     account_api::{
@@ -13,6 +18,12 @@ use crate::{
         AssessmentManagementApiClient, AssessmentManagementApiError, ManagementEmployee,
     },
     device_identity::DeviceIdentityAdapter,
+    navigation::{
+        active_parent, authorized_target, default_child, navigable_target, resolve_hash, route_for,
+        visible_items, MobilePlacement, NavigationIcon, NavigationId, NavigationProductState,
+        NavigationRole, NavigationZone,
+    },
+    organization_access_api::{OrganizationAccessApiClient, OrganizationAccessProfile},
     passkey::{PasskeyAdapter, PasskeyError},
     passkey_api::{PasskeyApiClient, PasskeySummary},
 };
@@ -22,8 +33,11 @@ use super::{
         registration_sms_request_allowed, AccountCreationLegalNotice, AccountLegalContext,
         AccountLegalNotice, RegistrationSmsLegalControls,
     },
-    bootstrap_owner_capability, capability_from_probe, AssessmentAttemptsPage,
-    AssessmentManagementPage, AssessmentsPage, ManagerCapability, WorkforceOnboardingPage,
+    bootstrap_owner_capability, capability_from_probe,
+    russian_phone_input::{canonical_russian_phone, russian_phone_is_complete, RussianPhoneInput},
+    AssessmentAttemptsPage, AssessmentLibrarySection, AssessmentListView, AssessmentsPage,
+    JoinOrganizationPage, ManagerCapability, MetricsNavigationView, OrganizationSettingsPage,
+    OrganizationSettingsSection, RestaurantMetricsDashboardPage, TeamArea, TeamManagementPage,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,16 +274,25 @@ pub fn InvitationAccountAuthPage(
 
     rsx! {
         div { class: "auth-root account-auth-root",
-            div { class: "auth-card account-auth-card",
+            div { class: "account-auth-shell",
+                aside { class: "account-auth-brand", aria_hidden: "true",
+                    div { class: "account-auth-brand__mark" }
+                    div {
+                        strong { "RestOS" }
+                        span { "Операционная система ресторана" }
+                    }
+                }
+                div { class: "auth-card account-auth-card",
                 div { class: "auth-header",
+                    img { class: "account-auth-mark", src: "/icons/icon-192.png", alt: "" }
                     div { class: "auth-title", "RestOS" }
-                    h1 { class: "account-auth-heading", "Вход в аккаунт" }
+                    h1 { class: "account-auth-heading", "Регистрация по приглашению" }
                     p { class: "auth-subtitle",
                         "Используйте ключ доступа или приглашение и номер телефона."
                     }
                 }
 
-                div { class: "account-live", role: "status", aria_live: "polite",
+                div { class: if error().is_some() { "account-live account-live--error" } else { "account-live" }, role: if error().is_some() { "alert" } else { "status" }, aria_live: "polite",
                     if let Some(message) = error() { "{message}" }
                 }
 
@@ -345,30 +368,32 @@ pub fn InvitationAccountAuthPage(
                                     oninput: move |event| invitation.set(event.value().chars().filter(|value| value.is_ascii_digit()).take(6).collect()),
                                 }
                             }
-                            div { class: "form-field",
-                                label { class: "field-label", r#for: "account-phone", "Номер телефона" }
-                                input {
-                                    id: "account-phone", class: "field-input", r#type: "tel",
-                                    autocomplete: "tel", value: "{phone}",
-                                    oninput: move |event| phone.set(event.value()),
-                                }
+                            RussianPhoneInput {
+                                id: "account-phone".to_string(),
+                                label: "Номер телефона".to_string(),
+                                value: phone(),
+                                invalid: false,
+                                disabled: operation() != UiOperation::Idle,
+                                described_by: String::new(),
+                                on_change: move |digits| { phone.set(digits); error.set(None); }
                             }
                             RegistrationSmsLegalControls { personal_data_consent, authorization_sms_consent }
                             button {
                                 class: "btn-primary w-full", r#type: "button",
-                                disabled: operation() != UiOperation::Idle || !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()),
+                                disabled: operation() != UiOperation::Idle || invitation().len() != 6 || !russian_phone_is_complete(&phone()) || !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()),
                                 onclick: move |_| {
                                     if operation() != UiOperation::Idle { return; }
                                     if !registration_sms_request_allowed(personal_data_consent(), authorization_sms_consent()) { return; }
-                                    if invitation().len() != 6 || phone().len() < 8 || phone().len() > 32 {
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else {
                                         error.set(Some("Проверьте код приглашения и номер телефона.".into()));
                                         return;
-                                    }
+                                    };
+                                    if invitation().len() != 6 { error.set(Some("Проверьте код приглашения и номер телефона.".into())); return; }
                                     operation.set(UiOperation::RequestingSms);
                                     generation += 1;
                                     let operation_generation = generation();
                                     let api = api.clone();
-                                    let request = SmsRequestInput { invitation_code: invitation(), phone: phone(), personal_data_consent: true, authorization_sms_consent: true };
+                                    let request = SmsRequestInput { invitation_code: invitation(), phone: canonical_phone, personal_data_consent: true, authorization_sms_consent: true };
                                     personal_data_consent.set(false);
                                     authorization_sms_consent.set(false);
                                     spawn(async move {
@@ -422,8 +447,9 @@ pub fn InvitationAccountAuthPage(
                                     operation.set(UiOperation::VerifyingSms);
                                     generation += 1;
                                     let operation_generation = generation();
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
                                     let api = verify_api.clone();
-                                    let request = SmsVerifyInput { phone_verification_challenge_id: challenge_id, phone: phone(), code: otp() };
+                                    let request = SmsVerifyInput { phone_verification_challenge_id: challenge_id, phone: canonical_phone, code: otp() };
                                     spawn(async move {
                                         let result = api.verify_sms(&request).await;
                                         if !accepts_completion(generation(), operation_generation) { return; }
@@ -467,8 +493,9 @@ pub fn InvitationAccountAuthPage(
                                     operation.set(UiOperation::RequestingSms);
                                     generation += 1;
                                     let operation_generation = generation();
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
                                     let api = resend_api.clone();
-                                    let request = SmsRequestInput { invitation_code: invitation(), phone: phone(), personal_data_consent: true, authorization_sms_consent: true };
+                                    let request = SmsRequestInput { invitation_code: invitation(), phone: canonical_phone, personal_data_consent: true, authorization_sms_consent: true };
                                     personal_data_consent.set(false);
                                     authorization_sms_consent.set(false);
                                     spawn(async move {
@@ -521,9 +548,10 @@ pub fn InvitationAccountAuthPage(
                                     let api = api.clone();
                                     let device_identities = device_identities.clone();
                                     let session = session.clone();
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
                                     let request = WebRegistrationInput {
                                         invitation_code: invitation(), phone_verification_challenge_id: challenge_id,
-                                        phone: phone(), display_name: display_name().trim().to_string(), password: password(),
+                                        phone: canonical_phone, display_name: display_name().trim().to_string(), password: password(),
                                         platform: "web".into(), device_display_name: Some("Браузер RestOS".into()),
                                     };
                                     spawn(async move {
@@ -548,43 +576,274 @@ pub fn InvitationAccountAuthPage(
                         }
                     },
                 }
+                }
             }
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AccountPilotTab {
-    MyAssessments,
-    Assessments,
-    Team,
-    Management,
-    Security,
+#[cfg(target_arch = "wasm32")]
+struct AccountHashListener {
+    window: web_sys::Window,
+    callback: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for AccountHashListener {
+    fn drop(&mut self) {
+        let _ = self.window.remove_event_listener_with_callback(
+            "hashchange",
+            self.callback.as_ref().unchecked_ref(),
+        );
+    }
+}
+
+fn initial_account_navigation() -> NavigationId {
+    if super::join_organization::group_invitation_token().is_some() {
+        return NavigationId::JoinOrganization;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(hash) = web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .filter(|hash| !hash.is_empty())
+    {
+        return resolve_hash(&hash).unwrap_or(NavigationId::Today);
+    }
+    NavigationId::Today
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_account_hash_listener(mut active: Signal<NavigationId>) -> Option<AccountHashListener> {
+    let window = web_sys::window()?;
+    let listener_window = window.clone();
+    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+        let next = listener_window
+            .location()
+            .hash()
+            .ok()
+            .and_then(|hash| resolve_hash(&hash))
+            .unwrap_or(NavigationId::Today);
+        active.set(next);
+    });
+    window
+        .add_event_listener_with_callback("hashchange", callback.as_ref().unchecked_ref())
+        .ok()?;
+    Some(AccountHashListener { window, callback })
+}
+
+fn navigate_account(mut active: Signal<NavigationId>, id: NavigationId) {
+    let Some(target) = navigable_target(id) else {
+        return;
+    };
+    active.set(target);
+    #[cfg(target_arch = "wasm32")]
+    if let Some(route) = route_for(target) {
+        if let Some(window) = web_sys::window() {
+            let _ = window.location().set_hash(route.trim_start_matches('#'));
+        }
+    }
+}
+
+fn role_from_profile(profile: OrganizationAccessProfile) -> NavigationRole {
+    match profile {
+        OrganizationAccessProfile::Owner => NavigationRole::Owner,
+        OrganizationAccessProfile::OrganizationManager => NavigationRole::OrganizationManager,
+        OrganizationAccessProfile::VenueManager => NavigationRole::VenueManager,
+        OrganizationAccessProfile::EmployeeUnassigned
+        | OrganizationAccessProfile::EmployeeVenue
+        | OrganizationAccessProfile::Unsupported => NavigationRole::Employee,
+    }
+}
+
+#[component]
+fn AccountNavigationTree(
+    role: NavigationRole,
+    active: NavigationId,
+    mut expanded: Signal<HashSet<NavigationId>>,
+    logging_out: bool,
+    on_navigate: EventHandler<NavigationId>,
+    on_logout: EventHandler<()>,
+) -> Element {
+    let visible = visible_items(role);
+    let active_root = active_parent(active);
+    rsx! {
+        nav { class: "brand-navigation-scroll", aria_label: "Разделы аккаунта",
+            for root in visible.iter().copied().filter(|item| item.zone == NavigationZone::Main && item.parent_id.is_none()) {
+                { let children = visible.iter().copied().filter(|item| item.parent_id == Some(root.id)).collect::<Vec<_>>();
+                  let parent_active = active_root == root.id;
+                  let is_expanded = parent_active || expanded().contains(&root.id);
+                  let is_standalone_current = parent_active && children.is_empty();
+                  let root_id = root.id;
+                  let root_target = default_child(root_id).unwrap_or(root_id);
+                  let navigate = on_navigate.clone();
+                  rsx! {
+                    div { class: if parent_active { "brand-nav-group is-active" } else { "brand-nav-group" },
+                        div { class: "brand-nav-parent-row",
+                            button {
+                                class: if parent_active { "brand-nav-item brand-nav-parent is-active" } else { "brand-nav-item brand-nav-parent" },
+                                r#type: "button",
+                                aria_current: if is_standalone_current { "page" } else { "false" },
+                                onclick: move |_| navigate.call(root_target),
+                                NavigationIcon { icon: root.icon }
+                                span { "{root.label}" }
+                            }
+                            if !children.is_empty() {
+                                button {
+                                    class: "brand-nav-expand",
+                                    r#type: "button",
+                                    aria_label: if is_expanded { format!("Свернуть раздел {}", root.label) } else { format!("Развернуть раздел {}", root.label) },
+                                    aria_expanded: is_expanded,
+                                    onclick: move |_| {
+                                        let mut next = expanded();
+                                        if !next.insert(root_id) { next.remove(&root_id); }
+                                        expanded.set(next);
+                                    },
+                                    span { aria_hidden: "true", if is_expanded { "−" } else { "+" } }
+                                }
+                            }
+                        }
+                        if is_expanded && !children.is_empty() {
+                            div { class: "brand-nav-children",
+                                for child in children {
+                                    { let child_id = child.id; let navigate = on_navigate.clone(); rsx! {
+                                        button {
+                                            class: if active == child_id { "brand-nav-item brand-nav-child is-active" } else { "brand-nav-item brand-nav-child" },
+                                            r#type: "button",
+                                            aria_current: if active == child_id { "page" } else { "false" },
+                                            onclick: move |_| navigate.call(child_id),
+                                            NavigationIcon { icon: child.icon, class: "navigation-icon navigation-icon--child".to_string() }
+                                            span { "{child.label}" }
+                                            if child.state == NavigationProductState::ComingSoon { small { class: "brand-nav-state", "Скоро" } }
+                                        }
+                                    } }
+                                }
+                            }
+                        }
+                    }
+                  }
+                }
+            }
+        }
+        div { class: "brand-account-actions",
+            p { "Аккаунт" }
+            for item in visible.iter().copied().filter(|item| item.zone == NavigationZone::Service) {
+                if item.id == NavigationId::Logout {
+                    { let logout = on_logout.clone(); rsx! {
+                        button { class: "brand-nav-item", r#type: "button", disabled: logging_out, onclick: move |_| logout.call(()),
+                            NavigationIcon { icon: item.icon }
+                            span { if logging_out { "Выход..." } else { "Выйти" } }
+                        }
+                    } }
+                } else {
+                    { let item_id = item.id; let navigate = on_navigate.clone(); rsx! {
+                        button {
+                            class: if active == item_id { "brand-nav-item is-active" } else { "brand-nav-item" },
+                            r#type: "button", aria_current: if active == item_id { "page" } else { "false" },
+                            onclick: move |_| navigate.call(item_id),
+                            NavigationIcon { icon: item.icon }
+                            span { "{item.label}" }
+                        }
+                    } }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AccountMobileNavigation(
+    role: NavigationRole,
+    active: NavigationId,
+    on_navigate: EventHandler<NavigationId>,
+    on_more: EventHandler<()>,
+) -> Element {
+    let active_root = active_parent(active);
+    let primary = visible_items(role)
+        .into_iter()
+        .filter(|item| {
+            item.zone == NavigationZone::Main
+                && item.parent_id.is_none()
+                && item.mobile == MobilePlacement::Primary
+        })
+        .collect::<Vec<_>>();
+    rsx! {
+        nav { class: "brand-mobile-nav", aria_label: "Основная навигация",
+            for item in primary {
+                { let item_id = item.id; let target = default_child(item_id).unwrap_or(item_id); let navigate = on_navigate.clone(); rsx! {
+                    button { class: if active_root == item_id { "active" } else { "" }, r#type: "button", onclick: move |_| navigate.call(target),
+                        NavigationIcon { icon: item.icon }
+                        small { "{item.label}" }
+                    }
+                } }
+            }
+            button { r#type: "button", aria_label: "Открыть все разделы", onclick: move |_| on_more.call(()),
+                NavigationIcon { icon: crate::navigation::NavigationIconId::ListTree }
+                small { "Ещё" }
+            }
+        }
+    }
+}
+
+#[component]
+fn AccountProfilePage(role: NavigationRole) -> Element {
+    let session = use_context::<AccountSessionAdapter>();
+    let company_name = match session.state() {
+        AccountSessionState::Authenticated(value) => value
+            .selected_company
+            .and_then(|selected| {
+                value
+                    .bootstrap
+                    .companies
+                    .into_iter()
+                    .find(|company| company.company_id == selected.0)
+            })
+            .map(|company| company.company_name),
+        _ => None,
+    };
+    let role_label = match role {
+        NavigationRole::Employee => "Сотрудник",
+        NavigationRole::VenueManager => "Менеджер ресторана",
+        NavigationRole::OrganizationManager => "Менеджер организации",
+        NavigationRole::Owner => "Владелец",
+    };
+    rsx! { section { class: "journey-page", aria_labelledby: "account-profile-title",
+        header { class: "journey-hero", p { class: "management-eyebrow", "АККАУНТ" } h1 { id: "account-profile-title", "Профиль" } p { "Текущий рабочий контекст без служебных идентификаторов." } }
+        article { class: "journey-panel", h2 { "Доступ" } p { strong { "Роль: " } "{role_label}" } if let Some(name) = company_name { p { strong { "Организация: " } "{name}" } } }
+    } }
 }
 
 #[component]
 pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
     let session = use_context::<AccountSessionAdapter>();
     let management_api = use_context::<AssessmentManagementApiClient>();
-    let mut tab = use_signal(|| AccountPilotTab::MyAssessments);
+    let access_api = use_context::<OrganizationAccessApiClient>();
+    let active = use_signal(initial_account_navigation);
+    #[cfg(target_arch = "wasm32")]
+    let _hash_listener = use_hook(move || install_account_hash_listener(active).map(Rc::new));
     let mut logging_out = use_signal(|| false);
     let mut lifecycle_epoch = use_signal(|| 0_u64);
+    let mut launched_attempt =
+        use_signal(|| None::<crate::assessment_attempt_api::AttemptDocument>);
     let mut capability_generation = use_signal(|| 0_u64);
+    let mut navigation_open = use_signal(|| false);
+    let mut expanded = use_signal(HashSet::<NavigationId>::new);
     use_context_provider(|| lifecycle_epoch);
 
     let probe_session = session.clone();
     let probe_api = management_api.clone();
-    let capability_probe = use_resource(move || {
+    let probe_access_api = access_api.clone();
+    let role_probe = use_resource(move || {
         let generation = capability_generation();
         let epoch = lifecycle_epoch();
         let state = probe_session.state();
         let api = probe_api.clone();
+        let access_api = probe_access_api.clone();
         async move {
             let AccountSessionState::Authenticated(account) = state else {
-                return (generation, epoch, None, ManagerCapability::Hidden);
+                return (generation, epoch, None, Ok(NavigationRole::Employee));
             };
             let Some(company_id) = account.selected_company.map(|value| value.0) else {
-                return (generation, epoch, None, ManagerCapability::Hidden);
+                return (generation, epoch, None, Ok(NavigationRole::Employee));
             };
             let relationship = account
                 .bootstrap
@@ -597,7 +856,7 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                     generation,
                     epoch,
                     Some(company_id),
-                    ManagerCapability::Authorized,
+                    Ok(NavigationRole::Owner),
                 );
             }
             if relationship != Some("employee") {
@@ -605,8 +864,28 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                     generation,
                     epoch,
                     Some(company_id),
-                    ManagerCapability::Hidden,
+                    Ok(NavigationRole::Employee),
                 );
+            }
+            let employee_profile_id = account
+                .bootstrap
+                .companies
+                .iter()
+                .find(|company| company.company_id == company_id)
+                .and_then(|company| company.employee_profile_id);
+            let access_result = access_api
+                .employees(&account.access_token, company_id)
+                .await;
+            if let Ok(employees) = access_result {
+                let role = employee_profile_id
+                    .and_then(|profile_id| {
+                        employees
+                            .into_iter()
+                            .find(|employee| employee.employee_profile_id == profile_id)
+                    })
+                    .map(|employee| role_from_profile(employee.profile))
+                    .unwrap_or(NavigationRole::Employee);
+                return (generation, epoch, Some(company_id), Ok(role));
             }
             let result: Result<Vec<ManagementEmployee>, AssessmentManagementApiError> = api
                 .employees(&account.access_token, company_id, None, 1, None)
@@ -615,7 +894,11 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                 generation,
                 epoch,
                 Some(company_id),
-                capability_from_probe(&result),
+                match capability_from_probe(&result) {
+                    ManagerCapability::Authorized => Ok(NavigationRole::VenueManager),
+                    ManagerCapability::Hidden => Ok(NavigationRole::Employee),
+                    ManagerCapability::Checking | ManagerCapability::Error => Err(()),
+                },
             )
         }
     });
@@ -629,36 +912,123 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
         _ => (&[][..], None),
     };
     let owner_capability = bootstrap_owner_capability(companies, selected_company);
-    let manager_capability = if owner_capability == ManagerCapability::Authorized {
-        ManagerCapability::Authorized
+    let role_result = if owner_capability == ManagerCapability::Authorized {
+        Some(Ok(NavigationRole::Owner))
     } else {
-        capability_probe()
-            .and_then(|(generation, epoch, company_id, capability)| {
-                (generation == capability_generation()
-                    && epoch == lifecycle_epoch()
-                    && company_id == selected_company)
-                    .then_some(capability)
-            })
-            .unwrap_or(ManagerCapability::Checking)
+        role_probe().and_then(|(generation, epoch, company_id, role)| {
+            (generation == capability_generation()
+                && epoch == lifecycle_epoch()
+                && company_id == selected_company)
+                .then_some(role)
+        })
     };
-    if matches!(tab(), AccountPilotTab::Management | AccountPilotTab::Team)
-        && manager_capability != ManagerCapability::Authorized
+    let navigation_role = role_result
+        .and_then(Result::ok)
+        .unwrap_or(NavigationRole::Employee);
+    let manager_capability = match role_result {
+        Some(Ok(role)) if role.is_manager() => ManagerCapability::Authorized,
+        Some(Ok(_)) => ManagerCapability::Hidden,
+        Some(Err(_)) => ManagerCapability::Error,
+        None => ManagerCapability::Checking,
+    };
+    let company_session = session.clone();
+    if role_result.is_some()
+        && authorized_target(route_for(active()).unwrap_or("#/today"), navigation_role) != active()
     {
-        tab.set(AccountPilotTab::MyAssessments);
+        navigate_account(active, NavigationId::Today);
     }
 
+    let navigate = EventHandler::new(move |id: NavigationId| {
+        launched_attempt.set(None);
+        expanded.with_mut(|items| {
+            items.insert(active_parent(id));
+        });
+        navigate_account(active, id);
+        navigation_open.set(false);
+    });
+
     rsx! {
-        div { class: "account-pilot app-root",
-            header { class: "account-pilot-header",
+        div {
+            class: if navigation_open() { "account-pilot brand-account-shell brand-account-shell--nav-open app-root" } else { "account-pilot brand-account-shell app-root" },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape {
+                    navigation_open.set(false);
+                }
+            },
+            div { class: "brand-account-ambient", aria_hidden: "true" }
+            button {
+                class: "brand-home-logo",
+                r#type: "button",
+                aria_label: "На главную RestOS",
+                onclick: move |_| {
+                    launched_attempt.set(None);
+                    navigate_account(active, NavigationId::Today);
+                    navigation_open.set(false);
+                },
+                img { src: "/brand/r-icon-master.png", alt: "" }
                 strong { "RestOS" }
-                nav { aria_label: "Разделы аккаунта",
-                    button { class: if tab() == AccountPilotTab::MyAssessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::MyAssessments), "Мои оценки" }
-                    button { class: if tab() == AccountPilotTab::Assessments { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Assessments), "Шаблоны" }
-                    if manager_capability == ManagerCapability::Authorized {
-                        button { class: if tab() == AccountPilotTab::Team { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Team), "Команда" }
-                        button { class: if tab() == AccountPilotTab::Management { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Management), "Назначения" }
+            }
+            div {
+                class: "brand-nav-edge-trigger",
+                tabindex: "0",
+                aria_label: "Открыть боковое меню",
+                onmouseenter: move |_| navigation_open.set(true),
+                onfocus: move |_| navigation_open.set(true),
+                span { class: "sr-only", "Открыть боковое меню" }
+            }
+            button {
+                class: "brand-nav-toggle",
+                r#type: "button",
+                aria_label: "Открыть меню",
+                aria_expanded: navigation_open(),
+                onclick: move |_| navigation_open.set(true),
+                "☰"
+            }
+            if navigation_open() {
+                button { class: "brand-nav-backdrop", r#type: "button", aria_label: "Закрыть меню", onclick: move |_| navigation_open.set(false) }
+            }
+            aside {
+                class: if navigation_open() { "account-pilot-header brand-account-nav is-open" } else { "account-pilot-header brand-account-nav" },
+                onmouseenter: move |_| navigation_open.set(true),
+                onmouseleave: move |_| navigation_open.set(false),
+                div { class: "brand-account-logo",
+                    button {
+                        class: "brand-account-logo__action",
+                        r#type: "button",
+                        aria_label: "На главную RestOS",
+                        onclick: move |_| {
+                            launched_attempt.set(None);
+                            navigate_account(active, NavigationId::Today);
+                            navigation_open.set(false);
+                        },
+                        img { src: "/brand/r-icon-master.png", alt: "" }
+                        div { strong { "RestOS" } small { "Операционная система ресторана" } }
                     }
-                    button { class: if tab() == AccountPilotTab::Security { "active" } else { "" }, r#type: "button", onclick: move |_| tab.set(AccountPilotTab::Security), "Безопасность" }
+                }
+                if companies.len() > 1 {
+                    label { class: "brand-company-switcher",
+                        span { "Компания" }
+                        select {
+                            aria_label: "Выбрать компанию",
+                            value: selected_company.map(|value| value.to_string()).unwrap_or_default(),
+                            onchange: move |event| {
+                                let Ok(company_id) = Uuid::parse_str(&event.value()) else { return; };
+                                if company_session.select_company(crate::account_api::SelectedCompanyId(company_id)).is_ok() {
+                                    lifecycle_epoch += 1;
+                                    capability_generation += 1;
+                                    launched_attempt.set(None);
+                                    navigate_account(active, NavigationId::Today);
+                                    navigation_open.set(false);
+                                }
+                            },
+                            option { value: "", disabled: true, "Выберите компанию" }
+                            for company in companies.iter() {
+                                option { key: "company-{company.company_id}", value: "{company.company_id}", "{company.company_name}" }
+                            }
+                        }
+                    }
+                } else if let Some(company) = companies.first() {
+                    p { class: "brand-company-label", "{company.company_name}" }
                 }
                 if manager_capability == ManagerCapability::Error {
                     button {
@@ -667,32 +1037,78 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                         "Повторить проверку доступа"
                     }
                 }
-                button {
-                    class: "btn-ghost", r#type: "button", disabled: logging_out(),
-                    onclick: move |_| {
+                AccountNavigationTree {
+                    role: navigation_role,
+                    active: active(),
+                    expanded,
+                    logging_out: logging_out(),
+                    on_navigate: navigate,
+                    on_logout: move |_| {
                         if logging_out() { return; }
                         logging_out.set(true);
                         lifecycle_epoch += 1;
                         let session = session.clone();
                         spawn(async move { let _ = session.logout().await; on_logout.call(()); });
-                    },
-                    if logging_out() { "Выход..." } else { "Выйти" }
+                    }
                 }
             }
-            main { class: "account-pilot-main",
-                match tab() {
-                    AccountPilotTab::MyAssessments => rsx! { AssessmentAttemptsPage {} },
-                    AccountPilotTab::Assessments => rsx! { AssessmentsPage {} },
-                    AccountPilotTab::Team => rsx! { WorkforceOnboardingPage {} },
-                    AccountPilotTab::Management => rsx! {
-                        AssessmentManagementPage {
-                            on_company_changed: move |_| {
-                                tab.set(AccountPilotTab::MyAssessments);
-                                capability_generation += 1;
-                            }
+            AccountMobileNavigation {
+                role: navigation_role,
+                active: active(),
+                on_navigate: navigate,
+                on_more: move |_| navigation_open.set(true),
+            }
+            main { class: "account-pilot-main brand-account-main",
+                match active() {
+                    NavigationId::Today => rsx! {
+                        crate::components::AccountToday {
+                            manager_enabled: manager_capability == ManagerCapability::Authorized,
+                            on_assessments: move |_| navigate_account(active, NavigationId::AssessmentsActive),
+                            on_measure: move |_| navigate_account(active, NavigationId::Measure),
+                            on_templates: move |_| navigate_account(active, NavigationId::TemplateLibrary),
+                            on_team: move |_| navigate_account(active, NavigationId::TeamTasks),
+                            on_dashboard: move |_| navigate_account(active, NavigationId::AnalyticsBuilder),
                         }
                     },
-                    AccountPilotTab::Security => rsx! { PasskeySecurityPanel {} },
+                    NavigationId::AssessmentsActive | NavigationId::AssessmentsHistory | NavigationId::AssessmentsPlan => rsx! {
+                        AssessmentAttemptsPage {
+                            view: match active() { NavigationId::AssessmentsHistory => AssessmentListView::History, NavigationId::AssessmentsPlan => AssessmentListView::Planned, _ => AssessmentListView::Active },
+                            on_measure: move |_| { launched_attempt.set(None); navigate_account(active, NavigationId::Measure); },
+                            on_team: move |_| { launched_attempt.set(None); navigate_account(active, NavigationId::TeamTasks); },
+                            initial_attempt: launched_attempt()
+                        }
+                    },
+                    NavigationId::Measure => rsx! {
+                        crate::components::MeasurementLauncher {
+                            on_cancel: move |_| navigate_account(active, NavigationId::AssessmentsActive),
+                            on_attempt: move |value| { launched_attempt.set(Some(value)); navigate_account(active, NavigationId::AssessmentsActive); }
+                        }
+                    },
+                    NavigationId::TemplateLibrary | NavigationId::CompanyTemplates => rsx! { AssessmentsPage {
+                        section: if active() == NavigationId::CompanyTemplates { AssessmentLibrarySection::Company } else { AssessmentLibrarySection::Library },
+                        on_section_change: move |section| navigate_account(active, match section { AssessmentLibrarySection::Library => NavigationId::TemplateLibrary, AssessmentLibrarySection::Company => NavigationId::CompanyTemplates })
+                    } },
+                    NavigationId::JoinOrganization => rsx! { JoinOrganizationPage {} },
+                    NavigationId::OrganizationEmployees | NavigationId::OrganizationVenues | NavigationId::OrganizationAccess | NavigationId::OrganizationInvitations => rsx! { OrganizationSettingsPage {
+                        section: match active() { NavigationId::OrganizationVenues => OrganizationSettingsSection::Venues, NavigationId::OrganizationAccess => OrganizationSettingsSection::Positions, NavigationId::OrganizationInvitations => OrganizationSettingsSection::Invitations, _ => OrganizationSettingsSection::Employees },
+                        on_section_change: move |section| navigate_account(active, match section { OrganizationSettingsSection::Employees => NavigationId::OrganizationEmployees, OrganizationSettingsSection::Venues => NavigationId::OrganizationVenues, OrganizationSettingsSection::Positions => NavigationId::OrganizationAccess, OrganizationSettingsSection::Invitations => NavigationId::OrganizationInvitations })
+                    } },
+                    NavigationId::AnalyticsBuilder | NavigationId::AnalyticsResults | NavigationId::AnalyticsRestaurant | NavigationId::AnalyticsSources => rsx! {
+                        RestaurantMetricsDashboardPage {
+                            view: match active() { NavigationId::AnalyticsResults => MetricsNavigationView::Results, NavigationId::AnalyticsRestaurant => MetricsNavigationView::Restaurant, NavigationId::AnalyticsSources => MetricsNavigationView::Sources, _ => MetricsNavigationView::Builder },
+                            on_walkthrough_started: move |_| navigate_account(active, NavigationId::AssessmentsActive)
+                        }
+                    },
+                    NavigationId::TeamShifts | NavigationId::TeamTasks | NavigationId::TeamCalendar => rsx! {
+                        TeamManagementPage {
+                            can_manage: manager_capability == ManagerCapability::Authorized,
+                            area: match active() { NavigationId::TeamShifts => TeamArea::Shifts, NavigationId::TeamCalendar => TeamArea::Calendar, _ => TeamArea::Tasks },
+                            on_area_change: move |area| navigate_account(active, match area { TeamArea::Shifts => NavigationId::TeamShifts, TeamArea::Tasks => NavigationId::TeamTasks, TeamArea::Calendar => NavigationId::TeamCalendar })
+                        }
+                    },
+                    NavigationId::Profile => rsx! { AccountProfilePage { role: navigation_role } },
+                    NavigationId::Security => rsx! { PasskeySecurityPanel {} },
+                    NavigationId::Assessments | NavigationId::Templates | NavigationId::Organization | NavigationId::Analytics | NavigationId::Team | NavigationId::Logout => rsx! { div { role: "status", "Открываем раздел…" } },
                 }
             }
         }
@@ -724,13 +1140,14 @@ fn PasskeySecurityPanel() -> Element {
             _ => None,
         };
         async move {
-            if list_epoch != 0 {
-                return Err(AccountApiError::AuthenticationRequired);
-            }
-            match token {
+            let result = match token {
                 Some(token) => api.list(&token).await,
                 None => Err(AccountApiError::AuthenticationRequired),
+            };
+            if lifecycle_epoch() != list_epoch {
+                return Err(AccountApiError::AuthenticationRequired);
             }
+            result
         }
     });
 
@@ -861,6 +1278,81 @@ mod tests {
     use super::*;
     use crate::account_api::{AccountBootstrap, BootstrapAccount};
     use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn account_sidebar_uses_hover_edge_without_a_logo_overlapping_close_icon() {
+        let source = include_str!("account_portal.rs");
+        let shell = source
+            .split_once("pub fn AccountPilotShell")
+            .and_then(|(_, source)| source.split_once("fn PasskeySecurityPanel"))
+            .map(|(source, _)| source)
+            .unwrap_or_default();
+
+        assert!(shell.contains("brand-nav-edge-trigger"));
+        assert!(shell.contains("onmouseenter: move |_| navigation_open.set(true)"));
+        assert!(shell.contains("onmouseleave: move |_| navigation_open.set(false)"));
+        let escape_handler = shell
+            .find("event.key() == Key::Escape")
+            .expect("the account shell must own the Escape handler");
+        let sidebar = shell
+            .find("aside {")
+            .expect("the account shell must render the sidebar");
+        assert!(escape_handler < sidebar);
+        assert!(!shell.contains("if navigation_open() { \"×\" }"));
+        assert!(!shell.contains("aria_label: \"Скрыть меню\""));
+    }
+
+    #[wasm_bindgen_test]
+    fn authenticated_shell_always_exposes_a_home_logo_without_network_side_effects() {
+        let source = include_str!("account_portal.rs");
+        let shell = source
+            .split_once("pub fn AccountPilotShell")
+            .and_then(|(_, source)| source.split_once("fn PasskeySecurityPanel"))
+            .map(|(source, _)| source)
+            .unwrap_or_default();
+
+        assert!(shell.contains("class: \"brand-home-logo\""));
+        assert!(shell.matches("aria_label: \"На главную RestOS\"").count() >= 2);
+        assert!(
+            shell
+                .matches("navigate_account(active, NavigationId::Today)")
+                .count()
+                >= 3
+        );
+        assert!(shell.matches("launched_attempt.set(None)").count() >= 3);
+        assert!(shell.contains("class: \"brand-account-logo__action\""));
+        assert!(!shell.contains("AccountApiClient::"));
+    }
+
+    #[wasm_bindgen_test]
+    fn user_journey_has_six_work_sections_and_separate_account_actions() {
+        let source = include_str!("account_portal.rs");
+        let shell = source
+            .split_once("pub fn AccountPilotShell")
+            .and_then(|(_, source)| source.split_once("fn PasskeySecurityPanel"))
+            .map(|(source, _)| source)
+            .unwrap_or_default();
+
+        assert!(shell.contains("AccountNavigationTree"));
+        assert!(shell.contains("AccountMobileNavigation"));
+        assert!(shell.contains("role: navigation_role"));
+        assert!(shell.contains("active: active()"));
+        assert!(!shell.contains("AccountPilotTab"));
+    }
+
+    #[wasm_bindgen_test]
+    fn employee_task_navigation_does_not_require_manager_capability() {
+        let employee = visible_items(NavigationRole::Employee);
+        assert!(employee
+            .iter()
+            .any(|item| item.id == NavigationId::TeamTasks));
+        assert!(!employee
+            .iter()
+            .any(|item| item.id == NavigationId::Analytics));
+        assert!(!employee
+            .iter()
+            .any(|item| item.id == NavigationId::Organization));
+    }
 
     fn authenticated() -> AccountSessionState {
         AccountSessionState::Authenticated(crate::account_session::AuthenticatedAccountSession {

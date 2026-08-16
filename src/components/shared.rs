@@ -393,8 +393,8 @@ pub fn LoadingView(message: String) -> Element {
 #[component]
 pub fn ErrorView(message: String) -> Element {
     rsx! {
-        div { class: "error-container",
-            div { class: "error-icon", "⚠️" }
+        div { class: "error-container", role: "alert",
+            div { class: "error-icon", aria_hidden: "true", "!" }
             h2 { style: "font-size:18px; font-weight:500; color:var(--text);", "Ошибка" }
             p { style: "font-size:14px; color:var(--text2); font-weight:300;", "{message}" }
             button {

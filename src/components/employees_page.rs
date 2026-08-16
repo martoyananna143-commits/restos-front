@@ -272,7 +272,7 @@ pub fn EmployeesPage(token: String, is_employee_role: bool) -> Element {
                 }
 
                 if let Some(ref msg) = clipboard_err() {
-                    div { class: "error-msg", style: "margin: 12px 0 0;",
+                    div { class: "error-msg", role: "alert", style: "margin: 12px 0 0;",
                         div { style: "display:flex; justify-content: space-between; align-items: flex-start; gap: 10px;",
                             div {
                                 div { class: "label-text", "Не удалось скопировать" }
@@ -419,7 +419,7 @@ pub fn EmployeesPage(token: String, is_employee_role: bool) -> Element {
                                             }
                                         }
                                         if let Some(err) = standalone_error() {
-                                            div { class: "error-msg", "{err}" }
+                                            div { class: "error-msg", role: "alert", "{err}" }
                                         }
                                         button {
                                             class: "btn-primary",
@@ -488,7 +488,7 @@ pub fn EmployeesPage(token: String, is_employee_role: bool) -> Element {
                                             }
                                         }
                                         if let Some(err) = create_org_error() {
-                                            div { class: "error-msg", "{err}" }
+                                            div { class: "error-msg", role: "alert", "{err}" }
                                         }
                                         button {
                                             class: "btn-primary",
@@ -849,7 +849,7 @@ fn InviteWizard(
                 }
 
                 if let Some(err) = invite_error() {
-                    div { class: "error-msg", style: "margin-top: 10px;", "{err}" }
+                    div { class: "error-msg", role: "alert", style: "margin-top: 10px;", "{err}" }
                 }
 
                 if let Some(ok) = success {
