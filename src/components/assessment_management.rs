@@ -11,6 +11,7 @@ use crate::{
         AssessmentManagementApiClient, AssessmentManagementApiError, AssignableTemplate,
         AssignmentStatus, CreateAssignmentRequest, ManagementEmployee, ManagerAssignment,
     },
+    workforce_api::{WorkforceApiClient, WorkforceVenue},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +30,7 @@ struct ManagementData {
     employees: Vec<ManagementEmployee>,
     templates: Vec<AssignableTemplate>,
     assignments: Vec<ManagerAssignment>,
+    venues: Vec<WorkforceVenue>,
 }
 
 pub fn bootstrap_owner_capability(
@@ -178,6 +180,7 @@ fn current_token_and_company(
 pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element {
     let session = use_context::<AccountSessionAdapter>();
     let api = use_context::<AssessmentManagementApiClient>();
+    let workforce_api = use_context::<WorkforceApiClient>();
     let lifecycle_epoch = use_context::<Signal<u64>>();
     let mut company_generation = use_signal(|| 0_u64);
     let mut operation_generation = use_signal(|| 0_u64);
@@ -185,6 +188,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
     let mut search = use_signal(String::new);
     let mut selected_employee = use_signal(|| None::<Uuid>);
     let mut selected_template = use_signal(|| None::<Uuid>);
+    let mut selected_venue = use_signal(|| None::<Uuid>);
     let mut due_at = use_signal(String::new);
     let mut confirming_create = use_signal(|| false);
     let mut creating = use_signal(|| false);
@@ -196,6 +200,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
 
     let load_session = session.clone();
     let load_api = api.clone();
+    let load_workforce_api = workforce_api.clone();
     let data = use_resource(move || {
         let _reload = reload();
         let query = search();
@@ -203,6 +208,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
         let operation_company_generation = company_generation();
         let session = load_session.clone();
         let api = load_api.clone();
+        let workforce_api = load_workforce_api.clone();
         async move {
             let Some((token, company_id)) = current_token_and_company(&session) else {
                 return Err(AssessmentManagementApiError::AuthenticationRequired);
@@ -212,6 +218,10 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                 .await?;
             let templates = api.templates(&token, company_id).await?;
             let assignments = api.assignments(&token, company_id, None, 100, None).await?;
+            let venues = workforce_api
+                .venues(&token, company_id)
+                .await
+                .map_err(|_| AssessmentManagementApiError::InternalError)?;
             Ok(ManagementData {
                 company_id,
                 lifecycle_epoch: operation_epoch,
@@ -219,6 +229,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                 employees,
                 templates,
                 assignments,
+                venues,
             })
         }
     });
@@ -268,6 +279,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                                 operation_generation += 1;
                                 selected_employee.set(None);
                                 selected_template.set(None);
+                                selected_venue.set(None);
                                 detail.set(None);
                                 confirming_create.set(false);
                                 confirming_revoke.set(false);
@@ -358,6 +370,19 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                             }
                             if data.templates.is_empty() { p { class: "management-muted", "Нет опубликованных шаблонов для назначения." } }
                             label {
+                                span { "Ресторан для аналитики (необязательно)" }
+                                select {
+                                    value: selected_venue().map(|value| value.to_string()).unwrap_or_default(),
+                                    onchange: move |event| {
+                                        selected_venue.set(Uuid::parse_str(&event.value()).ok());
+                                    },
+                                    option { value: "", "Без привязки к ресторану" }
+                                    for venue in data.venues.iter() {
+                                        option { key: "venue-{venue.venue_id}", value: "{venue.venue_id}", "{venue.name}" }
+                                    }
+                                }
+                            }
+                            label {
                                 span { "Срок выполнения — ваше местное время (необязательно)" }
                                 input { r#type: "datetime-local", value: "{due_at}", oninput: move |event| due_at.set(event.value()) }
                             }
@@ -382,6 +407,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                                             let request = CreateAssignmentRequest {
                                                 employee_profile_id: selected_employee().unwrap_or_default(),
                                                 template_version_id: selected_template().unwrap_or_default(),
+                                                venue_id: selected_venue(),
                                                 due_at: due.filter(|value| !value.is_empty()),
                                             };
                                             let api = create_api.clone();
@@ -391,7 +417,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                                                 if !scoped_result_is_current(lifecycle_epoch(), epoch, company_generation(), company_scope, selected_company(&session.state()), company_id, operation_generation(), generation) { return; }
                                                 creating.set(false);
                                                 match result {
-                                                    Ok(value) => { detail.set(Some(value)); confirming_create.set(false); selected_employee.set(None); selected_template.set(None); due_at.set(String::new()); reload += 1; mutation_error.set(Some("Оценка назначена.".into())); },
+                                                    Ok(value) => { detail.set(Some(value)); confirming_create.set(false); selected_employee.set(None); selected_template.set(None); selected_venue.set(None); due_at.set(String::new()); reload += 1; mutation_error.set(Some("Оценка назначена.".into())); },
                                                     Err(problem) => mutation_error.set(Some(safe_management_error(&problem).into())),
                                                 }
                                             });
@@ -482,6 +508,7 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                                         p { "Отозвать назначение? Сохранённые данные не удаляются, сотрудник увидит режим только для чтения." }
                                         button {
                                             class: "btn-danger", r#type: "button", disabled: revoking(), aria_busy: revoking(),
+                                            aria_label: "Подтвердить отзыв назначения. Необратимое действие",
                                             onclick: {
                                                 let assignment_id = current.id;
                                                 let status = current.status;
@@ -509,12 +536,16 @@ pub fn AssessmentManagementPage(on_company_changed: EventHandler<()>) -> Element
                                                     });
                                                 }
                                             },
+                                            span { class: "semantic-button-icon", aria_hidden: "true", "!" }
                                             if revoking() { "Отзыв..." } else if mutation_error().is_some() { "Повторить отзыв" } else { "Подтвердить отзыв" }
                                         }
                                         button { class: "btn-ghost", r#type: "button", disabled: revoking(), onclick: move |_| confirming_revoke.set(false), "Отмена" }
                                     }
                                 } else {
-                                    button { class: "btn-danger", r#type: "button", onclick: move |_| { mutation_error.set(None); confirming_revoke.set(true); }, "Отозвать назначение" }
+                                    button { class: "btn-danger", r#type: "button", aria_label: "Отозвать назначение. Необратимое действие", onclick: move |_| { mutation_error.set(None); confirming_revoke.set(true); },
+                                        span { class: "semantic-button-icon", aria_hidden: "true", "!" }
+                                        "Отозвать назначение"
+                                    }
                                 }
                             }
                         }

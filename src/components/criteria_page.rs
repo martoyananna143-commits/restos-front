@@ -322,7 +322,7 @@ fn CriterionForm(
 
                 div { class: "pad", style: "margin-top: 14px;",
                     {error().map(|message| rsx! {
-                        div { class: "error-card", style: "margin: 0 0 16px 0;",
+                        div { class: "error-card", role: "alert", style: "margin: 0 0 16px 0;",
                             p { class: "error-text", "{message}" }
                         }
                     })}

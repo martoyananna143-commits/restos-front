@@ -6,20 +6,50 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use serde_json::{json, Value};
 use uuid::Uuid;
+use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{
     account_session::{AccountSessionAdapter, AccountSessionState},
     assessment_attempt_api::{
-        AssessmentAttemptApiClient, AssessmentAttemptApiError, AssessmentItem, AssignmentSummary,
-        AttemptAnswer, AttemptDocument, CompletionResult, ReplaceDraftRequest, RevisionConflict,
+        AssessmentAttemptApiClient, AssessmentAttemptApiError, AssessmentItem, AssessmentSection,
+        AssignmentHistoryPeriod, AssignmentSummary, AttemptAnswer, AttemptDocument,
+        CompletionResult, ReplaceDraftRequest, RevisionConflict,
+    },
+    organization_workflow_api::{
+        CreateTaskRequest, OrganizationWorkflowApiClient, OrganizationWorkflowApiError,
     },
 };
+
+use super::team_management::DraftTaskActions;
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 750;
 const MAX_ANSWERS: usize = 5_000;
 const DEFAULT_TEXT_LIMIT: usize = 10_000;
 const MAX_MULTI_OPTIONS: usize = 100;
 const MAX_DOCUMENT_BYTES: usize = 1_000_000;
+
+fn browser_request_id() -> Option<Uuid> {
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("crypto")).ok()?;
+    let random_uuid = js_sys::Reflect::get(&crypto, &JsValue::from_str("randomUUID")).ok()?;
+    let function = random_uuid.dyn_into::<js_sys::Function>().ok()?;
+    Uuid::parse_str(&function.call0(&crypto).ok()?.as_string()?).ok()
+}
+
+fn safe_task_error(error: &OrganizationWorkflowApiError) -> &'static str {
+    match error {
+        OrganizationWorkflowApiError::AuthenticationRequired => "Сессия недоступна. Войдите снова.",
+        OrganizationWorkflowApiError::NotFound => {
+            "Быстрая задача недоступна для текущего ресторана."
+        }
+        OrganizationWorkflowApiError::Conflict => "Задача уже изменилась. Откройте раздел задач.",
+        OrganizationWorkflowApiError::InvalidRequest => "Проверьте название задачи.",
+        OrganizationWorkflowApiError::Unavailable => "Создание задачи временно недоступно.",
+        OrganizationWorkflowApiError::NetworkUnavailable => {
+            "Нет связи с сервером. Повторите вручную."
+        }
+        OrganizationWorkflowApiError::InternalError => "Не удалось сохранить задачу.",
+    }
+}
 
 fn remaining_debounce_ms(last_change_ms: f64, now_ms: f64) -> u32 {
     if !last_change_ms.is_finite() || !now_ms.is_finite() || last_change_ms < 0.0 || now_ms < 0.0 {
@@ -54,6 +84,7 @@ struct DraftState {
     conflict: Option<RevisionConflict>,
     pending_after_flight: bool,
     last_change_ms: f64,
+    section_order: Vec<Uuid>,
 }
 
 impl DraftState {
@@ -72,6 +103,10 @@ impl DraftState {
             conflict: None,
             pending_after_flight: false,
             last_change_ms: 0.0,
+            section_order: normalized_section_order(
+                &attempt.document.sections,
+                &attempt.ui_metadata.section_order,
+            ),
         }
     }
 
@@ -110,16 +145,37 @@ impl DraftState {
         let mut answers = Vec::with_capacity(self.answers.len());
         for answer in self.answers.values() {
             let item = items.get(&answer.item_id).ok_or(())?;
-            answers.push(answer_for(item, answer.value.clone()).ok_or(())?);
+            let mut normalized = answer_for(item, answer.value.clone()).ok_or(())?;
+            normalized.comment = answer.comment.clone();
+            answers.push(normalized);
         }
         let request = ReplaceDraftRequest {
             expected_revision: self.server_revision,
             answers,
+            section_order: self.section_order.clone(),
         };
         let encoded = serde_json::to_vec(&request).map_err(|_| ())?;
         (encoded.len() <= MAX_DOCUMENT_BYTES)
             .then_some(request)
             .ok_or(())
+    }
+
+    fn change_section_order(&mut self, section_order: Vec<Uuid>, now_ms: f64) -> bool {
+        if section_order == self.section_order {
+            return false;
+        }
+        if section_order.len() != self.section_order.len()
+            || section_order.iter().collect::<BTreeSet<_>>()
+                != self.section_order.iter().collect::<BTreeSet<_>>()
+        {
+            return false;
+        }
+        self.section_order = section_order;
+        self.dirty_generation = self.dirty_generation.wrapping_add(1);
+        self.status = SaveStatus::Dirty;
+        self.conflict = None;
+        self.last_change_ms = now_ms;
+        true
     }
 
     fn accept_save(&mut self, snapshot_generation: u64, attempt: &AttemptDocument) {
@@ -148,6 +204,7 @@ impl DraftState {
                 .into_iter()
                 .map(|answer| (answer.item_id, answer))
                 .collect();
+            self.section_order = conflict.ui_metadata.section_order;
             self.dirty_generation = self.dirty_generation.wrapping_add(1);
             self.status = SaveStatus::Saved;
             self.pending_after_flight = false;
@@ -160,6 +217,99 @@ impl DraftState {
             self.server_revision = conflict.current_revision;
             self.dirty_generation = self.dirty_generation.wrapping_add(1);
             self.status = SaveStatus::Dirty;
+        }
+    }
+}
+
+fn normalized_section_order(sections: &[AssessmentSection], saved_order: &[Uuid]) -> Vec<Uuid> {
+    let canonical = sections
+        .iter()
+        .map(|section| section.id)
+        .collect::<Vec<_>>();
+    if saved_order.len() == canonical.len()
+        && saved_order.iter().collect::<BTreeSet<_>>() == canonical.iter().collect::<BTreeSet<_>>()
+    {
+        saved_order.to_vec()
+    } else {
+        canonical
+    }
+}
+
+fn move_section(order: &[Uuid], section_id: Uuid, offset: isize) -> Option<Vec<Uuid>> {
+    let current = order
+        .iter()
+        .position(|candidate| *candidate == section_id)?;
+    let target = current.checked_add_signed(offset)?;
+    if target >= order.len() {
+        return None;
+    }
+    let mut updated = order.to_vec();
+    updated.swap(current, target);
+    Some(updated)
+}
+
+fn drop_section_before(order: &[Uuid], source: Uuid, target: Uuid) -> Option<Vec<Uuid>> {
+    if source == target {
+        return None;
+    }
+    let source_index = order.iter().position(|candidate| *candidate == source)?;
+    let mut updated = order.to_vec();
+    updated.remove(source_index);
+    let target_index = updated.iter().position(|candidate| *candidate == target)?;
+    updated.insert(target_index, source);
+    (updated != order).then_some(updated)
+}
+
+fn ordered_sections(sections: &[AssessmentSection], order: &[Uuid]) -> Vec<AssessmentSection> {
+    order
+        .iter()
+        .filter_map(|id| sections.iter().find(|section| section.id == *id).cloned())
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SectionProgress {
+    NotStarted,
+    InProgress,
+    Complete,
+    RequiredMissing(usize),
+}
+
+fn section_progress(
+    section: &AssessmentSection,
+    answers: &BTreeMap<Uuid, AttemptAnswer>,
+    active: bool,
+) -> SectionProgress {
+    let answered = section
+        .items
+        .iter()
+        .filter(|item| answers.contains_key(&item.id))
+        .count();
+    let required_missing = section
+        .items
+        .iter()
+        .filter(|item| item.required && !answers.contains_key(&item.id))
+        .count();
+    if answered == section.items.len() && required_missing == 0 {
+        SectionProgress::Complete
+    } else if active || answered > 0 {
+        if required_missing > 0 && answered > 0 {
+            SectionProgress::RequiredMissing(required_missing)
+        } else {
+            SectionProgress::InProgress
+        }
+    } else {
+        SectionProgress::NotStarted
+    }
+}
+
+fn section_progress_label(progress: SectionProgress) -> String {
+    match progress {
+        SectionProgress::NotStarted => "○ Не начато".into(),
+        SectionProgress::InProgress => "◐ В процессе".into(),
+        SectionProgress::Complete => "✓ Заполнено".into(),
+        SectionProgress::RequiredMissing(count) => {
+            format!("! Обязательных осталось: {count}")
         }
     }
 }
@@ -331,6 +481,7 @@ fn answer_for_parts(
         item_id,
         answer_type: answer_type.to_string(),
         value,
+        comment: None,
     })
 }
 
@@ -402,8 +553,20 @@ fn save_label(status: SaveStatus) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssessmentListView {
+    Active,
+    History,
+    Planned,
+}
+
 #[component]
-pub fn AssessmentAttemptsPage() -> Element {
+pub fn AssessmentAttemptsPage(
+    view: AssessmentListView,
+    on_measure: EventHandler<()>,
+    on_team: EventHandler<()>,
+    initial_attempt: Option<AttemptDocument>,
+) -> Element {
     let session = use_context::<AccountSessionAdapter>();
     let api = use_context::<AssessmentAttemptApiClient>();
     let lifecycle_epoch = use_context::<Signal<u64>>();
@@ -414,11 +577,16 @@ pub fn AssessmentAttemptsPage() -> Element {
     let save_generation = use_signal(|| 0_u64);
     let submit_generation = use_signal(|| 0_u64);
     let mut assignments = use_signal(Vec::<AssignmentSummary>::new);
+    let mut history_period = use_signal(|| "today".to_string());
+    let mut history_from = use_signal(String::new);
+    let mut history_to = use_signal(String::new);
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
     let mut opening = use_signal(|| None::<Uuid>);
-    let mut attempt = use_signal(|| None::<AttemptDocument>);
-    let mut draft = use_signal(|| None::<DraftState>);
+    let initial_draft = initial_attempt.as_ref().map(DraftState::from_attempt);
+    let has_initial_attempt = initial_attempt.is_some();
+    let mut attempt = use_signal(|| initial_attempt);
+    let mut draft = use_signal(|| initial_draft);
     let mut current_section = use_signal(|| 0_usize);
     let mut completion = use_signal(|| None::<CompletionResult>);
     let confirming_submit = use_signal(|| false);
@@ -428,7 +596,20 @@ pub fn AssessmentAttemptsPage() -> Element {
     let load_session = session.clone();
     let load_api = api.clone();
     use_effect(move || {
+        if has_initial_attempt {
+            loading.set(false);
+            return;
+        }
+        if view == AssessmentListView::Planned {
+            assignments.set(Vec::new());
+            error.set(None);
+            loading.set(false);
+            return;
+        }
         let _epoch = lifecycle_epoch();
+        let period_code = history_period();
+        let custom_from = history_from();
+        let custom_to = history_to();
         let state = load_session.state();
         let company = match &state {
             AccountSessionState::Authenticated(value) => value.selected_company.map(|id| id.0),
@@ -458,7 +639,17 @@ pub fn AssessmentAttemptsPage() -> Element {
         let session = load_session.clone();
         let operation_epoch = lifecycle_epoch();
         spawn(async move {
-            let result = api.list_assignments(&token).await;
+            let period = match period_code.as_str() {
+                "yesterday" => AssignmentHistoryPeriod::Yesterday,
+                "previous_week" => AssignmentHistoryPeriod::PreviousWeek,
+                "previous_month" => AssignmentHistoryPeriod::PreviousMonth,
+                "custom" => AssignmentHistoryPeriod::Custom {
+                    date_from: custom_from,
+                    date_to: custom_to,
+                },
+                _ => AssignmentHistoryPeriod::Today,
+            };
+            let result = api.list_assignments(&token, company_id, &period).await;
             let current_company = match session.state() {
                 AccountSessionState::Authenticated(value) => value.selected_company.map(|id| id.0),
                 _ => None,
@@ -489,32 +680,121 @@ pub fn AssessmentAttemptsPage() -> Element {
     });
 
     if let Some(active) = attempt() {
-        return rsx! { AttemptEditor { active, attempt, draft, completion, current_section, confirming_submit, submitting, submit_requested, attempt_generation, save_generation, submit_generation } };
+        return rsx! { AttemptEditor { active, attempt, draft, completion, current_section, confirming_submit, submitting, submit_requested, attempt_generation, save_generation, submit_generation, on_team } };
     }
 
     rsx! {
         section { class: "attempt-page", aria_labelledby: "assigned-assessments-title",
-            header { class: "attempt-hero", h1 { id: "assigned-assessments-title", "Мои оценки" } p { "Назначенные вам оценки и сохранённые черновики." } }
-            div { class: "account-live", role: "status", aria_live: "polite", if let Some(message) = error() { "{message}" } }
+            header { class: "attempt-hero home-measurement-hero",
+                div {
+                    p { class: "management-eyebrow", "МОИ ОЦЕНКИ" }
+                    h1 { id: "assigned-assessments-title", "Оценки и черновики" }
+                    p { "Продолжите назначенную оценку или начните новый замер." }
+                }
+                button { class: "btn-primary home-measurement-cta", r#type: "button", onclick: move |_| on_measure.call(()), "Сделать замер" }
+            }
+            if view == AssessmentListView::History {
+                div { class: "assessment-period-proposal",
+                    label {
+                        span { "История завершённых оценок" }
+                        select {
+                            value: history_period(),
+                            onchange: move |event| {
+                                history_period.set(event.value());
+                                list_generation += 1;
+                            },
+                            option { value: "today", "Сегодня" }
+                            option { value: "yesterday", "Вчера" }
+                            option { value: "previous_week", "Прошлая неделя" }
+                            option { value: "previous_month", "Прошлый месяц" }
+                            option { value: "custom", "Свой период" }
+                        }
+                    }
+                    if history_period() == "custom" {
+                        label { span { "С" } input { r#type: "date", value: history_from(), onchange: move |event| { history_from.set(event.value()); list_generation += 1; } } }
+                        label { span { "По" } input { r#type: "date", value: history_to(), onchange: move |event| { history_to.set(event.value()); list_generation += 1; } } }
+                    }
+                    p { "Период применяется к завершённой истории по дате отправки." }
+                }
+            }
+            if view == AssessmentListView::Planned {
+                article { class: "planned-metrics-empty", role: "status",
+                    strong { "Плановые показатели" }
+                    p { "Пока нет утверждённых targets и формулы. Значения не подменяются демонстрационными данными." }
+                }
+            }
+            div { class: if error().is_some() { "account-live account-live--error" } else { "account-live" }, role: if error().is_some() { "alert" } else { "status" }, aria_live: if error().is_some() { "assertive" } else { "polite" }, if let Some(message) = error() { "{message}" } }
             if loading() { p { class: "account-muted", "Загрузка назначений..." } }
             else if error().is_some() { button { class: "btn-secondary", r#type: "button", onclick: move |_| list_generation += 1, "Повторить" } }
-            else if assignments().is_empty() { div { class: "account-empty", p { "Назначенных оценок пока нет." } } }
-            else { div { class: "attempt-assignment-list",
-                for item in assignments() {
-                    { let id = item.id; let action = assignment_action(&item.status, item.read_only); let session = session.clone(); let api = api.clone();
-                    rsx! { article { key: "{id}", class: "attempt-assignment-card",
-                        div { h2 { "{item.template_name}" } p { "{assignment_status(&item.status, item.read_only)}" } small { "Назначено: {item.assigned_at}" } if let Some(due) = item.due_at.as_ref() { small { "Срок: {due}" } } }
-                        if let Some(action) = action {
-                            button { class: "btn-primary", r#type: "button", disabled: opening().is_some(), onclick: move |_| {
-                                if !attempt_action_is_admitted(Some(action), opening().is_some()) { return; }
-                                let token = match session.state() { AccountSessionState::Authenticated(value) => value.access_token, _ => { error.set(Some("Сессия недоступна. Войдите снова.".into())); return; } };
-                                opening.set(Some(id)); attempt_generation += 1; let generation = attempt_generation(); let operation_epoch = lifecycle_epoch(); let operation_company_generation = company_generation(); let api = api.clone();
-                                spawn(async move { let result = api.create_or_resume(&token, id).await; if attempt_generation() != generation || lifecycle_epoch() != operation_epoch || company_generation() != operation_company_generation { return; } opening.set(None); match result { Ok(value) => { draft.set(Some(DraftState::from_attempt(&value))); attempt.set(Some(value)); current_section.set(0); }, Err(problem) => error.set(Some(safe_error(&problem).into())) } });
-                            }, if opening() == Some(id) { "Открытие..." } else { "{action.label()}" } }
+            else if assignments().is_empty() && view != AssessmentListView::Planned { div { class: "account-empty", p { "Назначенных оценок пока нет." } } }
+            else {
+                { let open_assignment = EventHandler::new(move |id: Uuid| {
+                    let Some(item) = assignments().into_iter().find(|item| item.id == id) else { return; };
+                    let action = assignment_action(&item.status, item.read_only);
+                    if !attempt_action_is_admitted(action, opening().is_some()) { return; }
+                    let token = match session.state() { AccountSessionState::Authenticated(value) => value.access_token, _ => { error.set(Some("Сессия недоступна. Войдите снова.".into())); return; } };
+                    opening.set(Some(id)); attempt_generation += 1; let generation = attempt_generation(); let operation_epoch = lifecycle_epoch(); let operation_company_generation = company_generation(); let api = api.clone();
+                    spawn(async move { let result = api.create_or_resume(&token, id).await; if attempt_generation() != generation || lifecycle_epoch() != operation_epoch || company_generation() != operation_company_generation { return; } opening.set(None); match result { Ok(value) => { draft.set(Some(DraftState::from_attempt(&value))); attempt.set(Some(value)); current_section.set(0); }, Err(problem) => error.set(Some(safe_error(&problem).into())) } });
+                });
+                rsx! {
+                    if view == AssessmentListView::Active {
+                        section { class: "attempt-assignment-group", aria_labelledby: "active-assessments-title",
+                            h2 { id: "active-assessments-title", "Активные" }
+                            div { class: "attempt-assignment-list",
+                                for item in assignments().into_iter().filter(|item| matches!(item.status.as_str(), "assigned" | "in_progress")) {
+                                    AssignmentCard { key: "active-{item.id}", item, opening: opening(), on_open: open_assignment.clone() }
+                                }
+                            }
                         }
-                    } } }
+                    }
+                    if view == AssessmentListView::History {
+                        section { class: "attempt-assignment-group", aria_labelledby: "assessment-history-title",
+                            h2 { id: "assessment-history-title", "История" }
+                            div { class: "attempt-assignment-list",
+                                for item in assignments().into_iter().filter(|item| item.status == "completed") {
+                                    AssignmentCard { key: "history-{item.id}", item, opening: opening(), on_open: open_assignment.clone() }
+                                }
+                            }
+                        }
+                        if assignments().iter().any(|item| !matches!(item.status.as_str(), "assigned" | "in_progress" | "completed")) {
+                            section { class: "attempt-assignment-group", aria_labelledby: "inactive-assessments-title",
+                                h2 { id: "inactive-assessments-title", "Недоступные" }
+                                div { class: "attempt-assignment-list",
+                                    for item in assignments().into_iter().filter(|item| !matches!(item.status.as_str(), "assigned" | "in_progress" | "completed")) {
+                                        AssignmentCard { key: "inactive-{item.id}", item, opening: opening(), on_open: open_assignment.clone() }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } }
+            }
+        }
+    }
+}
+
+#[component]
+fn AssignmentCard(
+    item: AssignmentSummary,
+    opening: Option<Uuid>,
+    on_open: EventHandler<Uuid>,
+) -> Element {
+    let id = item.id;
+    let action = assignment_action(&item.status, item.read_only);
+    rsx! {
+        article { class: "attempt-assignment-card",
+            div {
+                h3 { "{item.template_name}" }
+                p { "{assignment_status(&item.status, item.read_only)}" }
+                small { "Назначено: {item.assigned_at}" }
+                if let Some(submitted) = item.submitted_at.as_ref() { small { "Отправлено: {submitted}" } }
+                if let Some(due) = item.due_at.as_ref() { small { "Срок: {due}" } }
+            }
+            if let Some(action) = action {
+                button { class: "btn-primary", r#type: "button", disabled: opening.is_some(), onclick: move |_| on_open.call(id),
+                    if opening == Some(id) { "Открытие..." } else { "{action.label()}" }
                 }
-            } }
+            }
         }
     }
 }
@@ -533,6 +813,55 @@ fn assignment_status(status: &str, read_only: bool) -> &'static str {
     }
 }
 
+fn scroll_to_attempt_section(index: usize) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(section) = document.get_element_by_id(&format!("attempt-section-{index}")) else {
+        return;
+    };
+    section.scroll_into_view();
+}
+
+fn visible_attempt_section(section_count: usize) -> Option<usize> {
+    let document = web_sys::window()?.document()?;
+    let container_top = document
+        .get_element_by_id("attempt-sections")?
+        .get_bounding_client_rect()
+        .top();
+    (0..section_count).min_by(|left, right| {
+        let distance = |index: usize| {
+            document
+                .get_element_by_id(&format!("attempt-section-{index}"))
+                .map(|section| (section.get_bounding_client_rect().top() - container_top).abs())
+                .unwrap_or(f64::MAX)
+        };
+        distance(*left).total_cmp(&distance(*right))
+    })
+}
+
+#[component]
+fn AttemptTimer() -> Element {
+    let mut seconds = use_signal(|| 0_u64);
+    use_effect(move || {
+        spawn(async move {
+            loop {
+                TimeoutFuture::new(1_000).await;
+                seconds += 1;
+            }
+        });
+    });
+    let minutes = seconds() / 60;
+    let remainder = seconds() % 60;
+    rsx! {
+        div { class: "attempt-stopwatch", role: "timer", aria_label: "Время прохождения {minutes} минут {remainder} секунд",
+            span { class: "attempt-stopwatch__orbit", aria_hidden: "true" }
+            strong { "{minutes:02}:{remainder:02}" }
+            small { "Время замера" }
+        }
+    }
+}
+
 #[component]
 fn AttemptEditor(
     active: AttemptDocument,
@@ -546,13 +875,29 @@ fn AttemptEditor(
     mut attempt_generation: Signal<u64>,
     mut save_generation: Signal<u64>,
     mut submit_generation: Signal<u64>,
+    on_team: EventHandler<()>,
 ) -> Element {
     let session = use_context::<AccountSessionAdapter>();
     let api = use_context::<AssessmentAttemptApiClient>();
+    let workflow_api = use_context::<OrganizationWorkflowApiClient>();
     let lifecycle_epoch = use_context::<Signal<u64>>();
     let read_only = active.read_only || active.status == "submitted" || completion().is_some();
-    let sections = &active.document.sections;
+    let mut dragged_section = use_signal(|| None::<Uuid>);
+    let mut quick_task_open = use_signal(|| false);
+    let mut quick_task_title = use_signal(String::new);
+    let mut quick_task_description = use_signal(String::new);
+    let mut quick_task_busy = use_signal(|| false);
+    let mut quick_task_error = use_signal(|| None::<String>);
+    let mut quick_task_created = use_signal(|| false);
+    let mut result_details_open = use_signal(|| false);
+    let mut completion_task_reload = use_signal(|| 0_u64);
+    let rendered_order = draft()
+        .map(|state| state.section_order)
+        .unwrap_or_else(|| normalized_section_order(&active.document.sections, &[]));
+    let rendered_sections = ordered_sections(&active.document.sections, &rendered_order);
+    let sections = &rendered_sections;
     let section_index = current_section().min(sections.len().saturating_sub(1));
+    let section_count = sections.len();
     let total = sections
         .iter()
         .map(|section| section.items.len())
@@ -561,6 +906,7 @@ fn AttemptEditor(
     let status = draft()
         .map(|state| state.status)
         .unwrap_or(SaveStatus::Saved);
+    let section_answers = draft().map(|state| state.answers).unwrap_or_default();
     let retry_active = active.clone();
     let retry_api = api.clone();
     let retry_session = session.clone();
@@ -570,15 +916,157 @@ fn AttemptEditor(
     let submit_active = active.clone();
     let submit_api = api.clone();
     let submit_session = session.clone();
+    let order_active = active.clone();
+    let order_api = api.clone();
+    let order_session = session.clone();
+    let current_section_id = sections.get(section_index).map(|section| section.id);
+    let completion_task_api = workflow_api.clone();
+    let completion_task_session = session.clone();
+    let completion_attempt_id = active.id;
+    let completion_tasks = use_resource(move || {
+        let completed = completion().is_some();
+        let _reload = completion_task_reload();
+        let api = completion_task_api.clone();
+        let session = completion_task_session.clone();
+        async move {
+            if !completed {
+                return None;
+            }
+            let AccountSessionState::Authenticated(account) = session.state() else {
+                return None;
+            };
+            let company_id = account.selected_company?.0;
+            Some(
+                api.tasks(&account.access_token, company_id, "created")
+                    .await
+                    .map(|tasks| {
+                        tasks
+                            .into_iter()
+                            .filter(|task| {
+                                task.assessment_attempt_id == Some(completion_attempt_id)
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+            )
+        }
+    });
+    let change_order = EventHandler::new(move |section_order: Vec<Uuid>| {
+        if read_only {
+            return;
+        }
+        let changed = draft.write().as_mut().is_some_and(|state| {
+            state.change_section_order(section_order.clone(), js_sys::Date::now())
+        });
+        if !changed {
+            return;
+        }
+        if let Some(active_id) = current_section_id {
+            if let Some(index) = section_order.iter().position(|id| *id == active_id) {
+                current_section.set(index);
+            }
+        }
+        save_generation += 1;
+        schedule_autosave(
+            order_active.clone(),
+            draft,
+            save_generation,
+            attempt_generation,
+            lifecycle_epoch,
+            order_api.clone(),
+            order_session.clone(),
+            false,
+            submit_generation,
+            submit_requested,
+            submitting,
+            confirming_submit,
+            completion,
+        );
+    });
 
     rsx! { section { class: "attempt-editor", aria_labelledby: "attempt-title",
-        header { class: "attempt-editor-header", button { class: "btn-ghost", r#type: "button", onclick: move |_| { attempt_generation += 1; attempt.set(None); draft.set(None); completion.set(None); }, "← К назначениям" } h1 { id: "attempt-title", "Прохождение оценки" } p { "Заполнено {answered} из {total}" } }
+        header { class: "attempt-editor-header", button { class: "btn-ghost", r#type: "button", onclick: move |_| { attempt_generation += 1; attempt.set(None); draft.set(None); completion.set(None); }, "← К замерам" } h1 { id: "attempt-title", "Прохождение оценки" } p { "Заполнено {answered} из {total}" } }
+        if !read_only { button { class: "attempt-quick-task-button", r#type: "button", onclick: move |_| { quick_task_error.set(None); quick_task_created.set(false); quick_task_open.set(true); }, "+ Быстрая задача" } }
         div { class: "attempt-save-status", role: "status", aria_live: "polite", "{save_label(status)}" }
         if let Some(reason) = active.read_only_reason.as_ref() { p { class: "account-safe-error", "{read_only_message(reason)}" } }
-        nav { class: "attempt-section-nav", aria_label: "Разделы оценки", for (index, section) in sections.iter().enumerate() { button { key: "{section.id}", class: if index == section_index { "active" } else { "" }, r#type: "button", onclick: move |_| current_section.set(index), "{section.title}" } } }
-        if let Some(section) = sections.get(section_index) { section { class: "attempt-section", h2 { "{section.title}" } if let Some(description) = section.description.as_ref() { p { "{description}" } }
-            for item in section.items.iter() { AnswerControl { key: "{item.id}", item: item.clone(), read_only, draft, active: active.clone(), attempt_generation, save_generation, submit_generation, submit_requested, submitting, confirming_submit, completion } }
-        } }
+        if completion().is_none() {
+            div { class: "attempt-editor-layout",
+                nav { class: "attempt-section-nav", aria_label: "Разделы оценки",
+                    for (index, section) in sections.iter().enumerate() {
+                        {
+                            let section_id = section.id;
+                            let progress = section_progress(section, &section_answers, index == section_index);
+                            let order_for_up = rendered_order.clone();
+                            let order_for_down = rendered_order.clone();
+                            let order_for_drop = rendered_order.clone();
+                            let move_up = change_order;
+                            let move_down = change_order;
+                            let drop_change = change_order;
+                            rsx! {
+                                div {
+                                    key: "{section_id}",
+                                    class: if index == section_index { "attempt-section-nav-item active" } else { "attempt-section-nav-item" },
+                                    ondragover: move |event| event.prevent_default(),
+                                    ondrop: move |event| {
+                                        event.prevent_default();
+                                        if let Some(source) = dragged_section() {
+                                            if let Some(updated) = drop_section_before(&order_for_drop, source, section_id) {
+                                                drop_change.call(updated);
+                                            }
+                                        }
+                                        dragged_section.set(None);
+                                    },
+                                    button {
+                                        class: "attempt-section-nav-main",
+                                        aria_current: (index == section_index).then_some("step"),
+                                        r#type: "button",
+                                        onclick: move |_| {
+                                            current_section.set(index);
+                                            scroll_to_attempt_section(index);
+                                        },
+                                        strong { "{section.title}" }
+                                        span { class: "attempt-section-nav-status", "{section_progress_label(progress)}" }
+                                    }
+                                    div { class: "attempt-section-order-actions", aria_label: "Изменить порядок раздела {section.title}",
+                                        button {
+                                            class: "attempt-section-drag",
+                                            r#type: "button",
+                                            draggable: "true",
+                                            disabled: read_only,
+                                            aria_label: "Перетащить раздел {section.title}",
+                                            ondragstart: move |_| dragged_section.set(Some(section_id)),
+                                            ondragend: move |_| dragged_section.set(None),
+                                            "⠿"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            disabled: read_only || index == 0,
+                                            aria_label: "Поднять раздел {section.title}",
+                                            onclick: move |_| if let Some(updated) = move_section(&order_for_up, section_id, -1) { move_up.call(updated); },
+                                            "↑"
+                                        }
+                                        button {
+                                            r#type: "button",
+                                            disabled: read_only || index + 1 == section_count,
+                                            aria_label: "Опустить раздел {section.title}",
+                                            onclick: move |_| if let Some(updated) = move_section(&order_for_down, section_id, 1) { move_down.call(updated); },
+                                            "↓"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                div { id: "attempt-sections", class: "attempt-sections", onscroll: move |_| if let Some(index) = visible_attempt_section(section_count) { current_section.set(index); },
+                    for (index, section) in sections.iter().enumerate() {
+                        section { id: "attempt-section-{index}", class: "attempt-section", h2 { "{section.title}" } if let Some(description) = section.description.as_ref() { p { "{description}" } }
+                            for item in section.items.iter() { AnswerControl { key: "{item.id}", item: item.clone(), read_only, draft, active: active.clone(), attempt_generation, save_generation, submit_generation, submit_requested, submitting, confirming_submit, completion } }
+                        }
+                    }
+                }
+            }
+            AttemptTimer {}
+        }
         if matches!(status, SaveStatus::Failed | SaveStatus::ValidationError) { button { class: "btn-secondary", r#type: "button", disabled: status == SaveStatus::ValidationError, onclick: move |_| {
             let Some(current) = draft() else { return; };
             let Some((prepared, next_generation)) = prepare_explicit_retry(&current, read_only, save_generation()) else { return; };
@@ -590,11 +1078,119 @@ fn AttemptEditor(
             button { class: "btn-secondary", r#type: "button", onclick: move |_| { save_generation += 1; if let Some(state) = draft.write().as_mut() { state.load_server(); } }, "Загрузить версию сервера" }
             button { class: "btn-ghost", r#type: "button", onclick: move |_| { save_generation += 1; if let Some(state) = draft.write().as_mut() { state.prepare_overwrite(); } schedule_autosave(overwrite_active.clone(), draft, save_generation, attempt_generation, lifecycle_epoch, overwrite_api.clone(), overwrite_session.clone(), true, submit_generation, submit_requested, submitting, confirming_submit, completion); }, "Оставить мои ответы и сохранить поверх" }
         } }
-        if let Some(result) = completion() { div { class: "attempt-result", h2 { "Оценка завершена" } p { "Отправлено: {result.submitted_at}" } p { "Ответов: {result.answered_count} из {result.total_count}; обязательных: {result.required_count}" } p { "Результат зафиксирован по полноте заполнения." } } }
+        if let Some(result) = completion() {
+            div {
+                class: "attempt-result",
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "attempt-complete-title",
+                h2 { id: "attempt-complete-title", "Замер завершён и сохранён" }
+                p { "Замер: оценка по выбранному шаблону" }
+                p { "Ресторан: выбранный для назначения" }
+                p { "Отправлено: {result.submitted_at}" }
+                p { "Ответов: {result.answered_count} из {result.total_count}; обязательных: {result.required_count}" }
+                if let Some(score) = result.score_percent.as_deref() {
+                    p { "Итоговый показатель: {score}%" }
+                    if let Some(coverage) = result.coverage.as_deref() {
+                        p { "Полнота данных: {coverage}" }
+                    }
+                    if result.critical_failure_count.unwrap_or_default() > 0 {
+                        p {
+                            class: "attempt-error",
+                            "Критические нарушения: {result.critical_failure_count.unwrap_or_default()}"
+                        }
+                    }
+                    if result.stop_factor_count.unwrap_or_default() > 0 {
+                        p {
+                            class: "attempt-error",
+                            "Стоп-факторы: {result.stop_factor_count.unwrap_or_default()}"
+                        }
+                    }
+                    if result_details_open() && !result.sections.is_empty() {
+                        ul { class: "attempt-section-results",
+                            for section in result.sections.iter() {
+                                li {
+                                    if let Some(score) = section.score_percent.as_deref() {
+                                        strong { "{section.title}: {score}%" }
+                                    } else {
+                                        strong { "{section.title}: нет данных" }
+                                    }
+                                    span { " · покрытие {section.coverage}" }
+                                    if section.critical_failure_count > 0 {
+                                        span { class: "attempt-error", " · критических отклонений {section.critical_failure_count}" }
+                                    }
+                                    if section.stop_factor_count > 0 {
+                                        span { class: "attempt-error", " · стоп-факторов {section.stop_factor_count}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    p { "Результат зафиксирован по полноте заполнения." }
+                }
+                match completion_tasks() {
+                    Some(Some(Ok(tasks))) if !tasks.is_empty() => rsx! {
+                        section { class: "attempt-completion-tasks", aria_labelledby: "attempt-completion-tasks-title",
+                            h3 { id: "attempt-completion-tasks-title", "Проверьте задачи" }
+                            ul { class: "task-list",
+                                for task in tasks.iter() {
+                                    li { key: "completion-task-{task.task_id}-{task.version}",
+                                        details { class: "task-detail", open: task.status == "draft",
+                                            summary { strong { "{task.title}" } span { class: "status-chip", "{task.status}" } }
+                                            if let Some(description) = task.description.clone() { p { "{description}" } }
+                                            if task.status == "draft" {
+                                                DraftTaskActions { task: task.clone(), on_changed: move |_| completion_task_reload += 1 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            p { "Черновики не видны сотрудникам, пока вы явно не назначите их." }
+                        }
+                    },
+                    Some(Some(Err(_))) => rsx! { p { class: "journey-warning", role: "status", "Замер сохранён. Список связанных задач временно не загрузился." } },
+                    _ => rsx! {},
+                }
+                div { class: "attempt-result-actions",
+                    button { class: "btn-primary", r#type: "button", onclick: move |_| { attempt_generation += 1; attempt.set(None); draft.set(None); completion.set(None); }, "Готово" }
+                    button { class: "btn-secondary", r#type: "button", onclick: move |_| result_details_open.set(true), "Открыть результат" }
+                    if completion_tasks().is_some_and(|value| value.is_some_and(|result| result.is_ok_and(|tasks| !tasks.is_empty()))) {
+                        button { class: "btn-secondary", r#type: "button", onclick: move |_| on_team.call(()), "Проверить и отправить задачи" }
+                    }
+                }
+                p { "Результат сохранён в RestOS и доступен ответственному руководителю." }
+            }
+        }
         else if !read_only { button { class: "btn-primary", r#type: "button", disabled: submit_preparation(status, read_only, submitting()) == SubmitPreparation::Blocked, onclick: move |_| confirming_submit.set(true), "Завершить оценку" } }
         if confirming_submit() { div { class: "attempt-confirm", role: "dialog", aria_modal: "true", aria_labelledby: "submit-confirm-title", h2 { id: "submit-confirm-title", "Отправить оценку?" } p { "После отправки ответы нельзя будет изменить." }
             button { class: "btn-primary", r#type: "button", disabled: submitting(), onclick: move |_| { submitting.set(true); submit_requested.set(true); submit_generation += 1; match submit_preparation(status, read_only, false) { SubmitPreparation::SubmitNow => start_submit(submit_active.id, submit_api.clone(), submit_session.clone(), attempt_generation, lifecycle_epoch, submit_generation, submit_requested, submitting, confirming_submit, completion, draft), SubmitPreparation::SaveFirst => schedule_autosave(submit_active.clone(), draft, save_generation, attempt_generation, lifecycle_epoch, submit_api.clone(), submit_session.clone(), true, submit_generation, submit_requested, submitting, confirming_submit, completion), SubmitPreparation::Blocked => { submit_requested.set(false); submitting.set(false); } } }, if submitting() { "Подготовка..." } else { "Подтвердить" } }
             button { class: "btn-ghost", r#type: "button", disabled: submitting(), onclick: move |_| confirming_submit.set(false), "Отмена" }
+        } }
+        if quick_task_open() { div { class: "attempt-confirm quick-task-dialog", role: "dialog", aria_modal: "true", aria_labelledby: "quick-task-title",
+            h2 { id: "quick-task-title", "Быстрая задача" }
+            p { "Задача будет связана с текущим замером и сохранена в черновики." }
+            div { class: "form-field", label { class: "field-label", r#for: "quick-task-name", "Что нужно сделать" } input { id: "quick-task-name", class: "field-input", maxlength: "255", value: "{quick_task_title}", disabled: quick_task_busy(), oninput: move |event| { quick_task_title.set(event.value()); quick_task_error.set(None); quick_task_created.set(false); } } }
+            div { class: "form-field", label { class: "field-label", r#for: "quick-task-description", "Описание — необязательно" } textarea { id: "quick-task-description", class: "field-input", maxlength: "4000", value: "{quick_task_description}", disabled: quick_task_busy(), oninput: move |event| quick_task_description.set(event.value()) } }
+            if quick_task_created() { p { class: "journey-success", role: "status", "Задача сохранена в черновики." } }
+            if let Some(message) = quick_task_error() { p { class: "journey-error", role: "alert", "{message}" } }
+            button { class: "btn-primary", r#type: "button", disabled: quick_task_busy() || quick_task_title().trim().is_empty(), onclick: move |_| {
+                let AccountSessionState::Authenticated(account) = session.state() else { quick_task_error.set(Some("Сессия недоступна. Войдите снова.".into())); return; };
+                let Some(company_id) = account.selected_company.map(|value| value.0) else { quick_task_error.set(Some("Выберите организацию.".into())); return; };
+                let Some(request_id) = browser_request_id() else { quick_task_error.set(Some("Не удалось подготовить безопасный запрос.".into())); return; };
+                quick_task_busy.set(true); quick_task_error.set(None); let task_api = workflow_api.clone(); let attempt_api = api.clone(); let token = account.access_token; let assignment_id = active.assignment_id; let attempt_id = active.id;
+                let title = quick_task_title().trim().to_string(); let description = (!quick_task_description().trim().is_empty()).then(|| quick_task_description().trim().to_string());
+                spawn(async move {
+                    let result = async {
+                        let assignment = attempt_api.get_assignment(&token, assignment_id).await.map_err(|problem| match problem { AssessmentAttemptApiError::NetworkUnavailable => OrganizationWorkflowApiError::NetworkUnavailable, AssessmentAttemptApiError::AuthenticationRequired => OrganizationWorkflowApiError::AuthenticationRequired, _ => OrganizationWorkflowApiError::NotFound })?;
+                        let venue_id = assignment.venue_id.ok_or(OrganizationWorkflowApiError::InvalidRequest)?;
+                        task_api.create_task(&token, company_id, &CreateTaskRequest { request_id, venue_id, assessment_attempt_id: Some(attempt_id), title, description }).await
+                    }.await;
+                    match result { Ok(_) => { quick_task_title.set(String::new()); quick_task_description.set(String::new()); quick_task_created.set(true); }, Err(problem) => quick_task_error.set(Some(safe_task_error(&problem).into())) }
+                    quick_task_busy.set(false);
+                });
+            }, if quick_task_busy() { "Сохранение…" } else { "Сохранить в черновики" } }
+            button { class: "btn-secondary", r#type: "button", disabled: quick_task_busy(), onclick: move |_| quick_task_open.set(false), "Закрыть" }
         } }
     } }
 }
@@ -640,6 +1236,12 @@ fn AnswerControl(
         .iter()
         .map(|option| option.id)
         .collect::<BTreeSet<_>>();
+    let change_active = active.clone();
+    let change_api = api.clone();
+    let change_session = session.clone();
+    let comment_active = active.clone();
+    let comment_api = api.clone();
+    let comment_session = session.clone();
     let change = EventHandler::new(move |value: Value| {
         if read_only {
             return;
@@ -659,13 +1261,13 @@ fn AnswerControl(
         }
         save_generation += 1;
         schedule_autosave(
-            active.clone(),
+            change_active.clone(),
             draft,
             save_generation,
             attempt_generation,
             lifecycle_epoch,
-            api.clone(),
-            session.clone(),
+            change_api.clone(),
+            change_session.clone(),
             false,
             submit_generation,
             submit_requested,
@@ -689,9 +1291,61 @@ fn AnswerControl(
         .flatten()
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
-    rsx! { fieldset { class: "attempt-question", disabled: read_only, legend { "{label}" } if let Some(guidance) = item.guidance.as_ref() { p { class: "attempt-guidance", "{guidance}" } }
+    let current_comment = current
+        .as_ref()
+        .and_then(|answer| answer.comment.clone())
+        .unwrap_or_default();
+    let comment_item_id = item_id;
+    let mut comment_change = move |value: String| {
+        if read_only || value.chars().count() > DEFAULT_TEXT_LIMIT {
+            return;
+        }
+        let changed = draft.write().as_mut().is_some_and(|state| {
+            let Some(answer) = state.answers.get(&comment_item_id).cloned() else {
+                return false;
+            };
+            let mut updated = answer;
+            updated.comment = (!value.is_empty()).then_some(value);
+            state.change(Some(updated), comment_item_id, js_sys::Date::now())
+        });
+        if !changed {
+            return;
+        }
+        save_generation += 1;
+        schedule_autosave(
+            comment_active.clone(),
+            draft,
+            save_generation,
+            attempt_generation,
+            lifecycle_epoch,
+            comment_api.clone(),
+            comment_session.clone(),
+            false,
+            submit_generation,
+            submit_requested,
+            submitting,
+            confirming_submit,
+            completion,
+        );
+    };
+    let question_class = match current.as_ref().and_then(|answer| answer.value.as_bool()) {
+        Some(true) if answer_type == "boolean" => "attempt-question attempt-question--positive",
+        Some(false) if answer_type == "boolean" => "attempt-question attempt-question--negative",
+        _ => "attempt-question",
+    };
+    rsx! { fieldset { class: question_class, disabled: read_only, legend { "{label}" } if let Some(guidance) = item.guidance.as_ref() { p { class: "attempt-guidance", "{guidance}" } }
         match answer_type.as_str() {
-            "boolean" => rsx! { select { value: current.as_ref().and_then(|a| a.value.as_bool()).map(|v| v.to_string()).unwrap_or_default(), onchange: move |event| boolean_change.call(json!(event.value() == "true")), option { value: "", "Выберите" } option { value: "true", "Да" } option { value: "false", "Нет" } } },
+            "boolean" => rsx! { div { class: "attempt-boolean-actions",
+                button { class: if current.as_ref().and_then(|a| a.value.as_bool()) == Some(true) { "is-selected is-positive" } else { "" }, r#type: "button", onclick: move |_| boolean_change.call(json!(true)), "✓ Да" }
+                button { class: if current.as_ref().and_then(|a| a.value.as_bool()) == Some(false) { "is-selected is-negative" } else { "" }, r#type: "button", onclick: move |_| boolean_change.call(json!(false)), "× Нет" }
+                button { r#type: "button", disabled: current.is_none(), onclick: move |_| {
+                    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                        if let Some(field) = document.get_element_by_id(&format!("attempt-observation-{item_id}")) {
+                            let _ = field.dyn_ref::<web_sys::HtmlElement>().map(|element| element.focus());
+                        }
+                    }
+                }, "+ Наблюдение" }
+            } },
             "score" | "integer" => rsx! { input { r#type: "number", value: current.as_ref().and_then(|a| a.value.as_i64()).map(|v| v.to_string()).unwrap_or_default(), oninput: move |event| if let Ok(value) = event.value().parse::<i64>() { integer_change.call(json!(value)); } } },
             "decimal" => rsx! { input { r#type: "number", step: "any", value: current.as_ref().and_then(|a| a.value.as_str()).unwrap_or_default(), oninput: move |event| decimal_change.call(json!(event.value())) } },
             "date" => rsx! { input { r#type: "date", value: current.as_ref().and_then(|a| a.value.as_str()).unwrap_or_default(), oninput: move |event| date_change.call(json!(event.value())) } },
@@ -728,6 +1382,12 @@ fn AnswerControl(
                 }
             },
             _ => rsx! { textarea { maxlength: "{item.config.max_length.unwrap_or(DEFAULT_TEXT_LIMIT)}", placeholder: item.config.placeholder.as_deref().unwrap_or(""), value: current.as_ref().and_then(|a| a.value.as_str()).unwrap_or_default(), oninput: move |event| text_change.call(json!(event.value())) } },
+        }
+        if answer_type == "boolean" || matches!(item.evidence_mode, crate::assessment_attempt_api::EvidenceMode::OptionalComment | crate::assessment_attempt_api::EvidenceMode::RequiredComment | crate::assessment_attempt_api::EvidenceMode::PhotoAndComment) {
+            label { class: "attempt-comment",
+                span { if item.evidence_mode == crate::assessment_attempt_api::EvidenceMode::RequiredComment { "Комментарий · обязательно" } else { "Комментарий" } }
+                textarea { id: "attempt-observation-{item_id}", maxlength: "{DEFAULT_TEXT_LIMIT}", value: "{current_comment}", placeholder: "Зафиксируйте наблюдение", oninput: move |event| comment_change(event.value()) }
+            }
         }
     } }
 }
@@ -938,9 +1598,16 @@ mod tests {
             answer_type: kind.into(),
             required: true,
             sort_order: 1,
+            weight: Some("1".into()),
+            min_value: None,
+            max_value: None,
+            passing_value: None,
+            evidence_mode: crate::assessment_attempt_api::EvidenceMode::None,
+            criticality: crate::assessment_attempt_api::Criticality::Normal,
             config: crate::assessment_attempt_api::InputConfig {
                 placeholder: None,
                 max_length: Some(20),
+                critical_threshold: None,
             },
             options: vec![crate::assessment_attempt_api::AssessmentOption {
                 id: OPTION_ID,
@@ -987,6 +1654,7 @@ mod tests {
             code: "assessment_revision_conflict".into(),
             current_revision: 4,
             answers: vec![answer_for(&item("text"), json!("server")).unwrap()],
+            ui_metadata: Default::default(),
         });
         assert_eq!(state.answers[&ITEM_ID].value, json!("local"));
         state.load_server();
@@ -1012,6 +1680,21 @@ mod tests {
             },
         );
         assert_eq!(state.status, SaveStatus::Dirty);
+    }
+
+    #[wasm_bindgen_test]
+    fn weighted_comment_evidence_survives_the_single_draft_payload() {
+        let attempt = test_attempt_with_item(item("boolean"));
+        let mut answer = answer_for(&item("boolean"), json!(false)).unwrap();
+        answer.comment = Some("Нарушение зафиксировано".into());
+        let mut state = DraftState::from_attempt(&attempt);
+        assert!(state.change(Some(answer), ITEM_ID, 100.0));
+        let payload = state.payload(&attempt).unwrap();
+        assert_eq!(
+            payload.answers[0].comment.as_deref(),
+            Some("Нарушение зафиксировано")
+        );
+        assert_eq!(payload.answers.len(), 1);
     }
 
     #[wasm_bindgen_test]
@@ -1268,6 +1951,7 @@ mod tests {
             code: "assessment_revision_conflict".into(),
             current_revision: 9,
             answers: vec![answer_for(&item("text"), json!("server")).unwrap()],
+            ui_metadata: Default::default(),
         });
         state.prepare_overwrite();
         let payload = state.payload(&attempt).unwrap();
@@ -1287,6 +1971,7 @@ mod tests {
                 item_id: Uuid::from_u128(99),
                 answer_type: "text".into(),
                 value: json!("hidden"),
+                comment: None,
             },
         );
         assert!(state.payload(&attempt).is_err());
@@ -1297,6 +1982,7 @@ mod tests {
                 item_id: ITEM_ID,
                 answer_type: "text".into(),
                 value: json!("a".repeat(DEFAULT_TEXT_LIMIT + 1)),
+                comment: None,
             },
         );
         assert!(state.payload(&attempt).is_err());
@@ -1399,6 +2085,82 @@ mod tests {
         assert!(prepared.payload(&attempt).is_ok());
     }
 
+    #[wasm_bindgen_test]
+    fn measurement_navigation_order_is_a_bounded_non_scoring_permutation() {
+        let first = Uuid::from_u128(101);
+        let second = Uuid::from_u128(102);
+        let third = Uuid::from_u128(103);
+        let canonical = vec![first, second, third];
+        assert_eq!(
+            move_section(&canonical, second, -1),
+            Some(vec![second, first, third])
+        );
+        assert_eq!(move_section(&canonical, first, -1), None);
+        assert_eq!(
+            drop_section_before(&canonical, third, first),
+            Some(vec![third, first, second])
+        );
+        assert_eq!(drop_section_before(&canonical, first, first), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn measurement_navigation_status_is_textual_and_not_color_only() {
+        let required = item("text");
+        let section = AssessmentSection {
+            id: Uuid::from_u128(201),
+            parent_section_id: None,
+            title: "Очень длинное название раздела".into(),
+            description: None,
+            sort_order: 0,
+            items: vec![required.clone()],
+        };
+        let mut answers = BTreeMap::new();
+        assert_eq!(
+            section_progress(&section, &answers, false),
+            SectionProgress::NotStarted
+        );
+        assert!(section_progress_label(SectionProgress::NotStarted).contains("Не начато"));
+        answers.insert(required.id, answer_for(&required, json!("готово")).unwrap());
+        assert_eq!(
+            section_progress(&section, &answers, false),
+            SectionProgress::Complete
+        );
+        assert!(section_progress_label(SectionProgress::Complete).contains("Заполнено"));
+    }
+
+    #[wasm_bindgen_test]
+    fn measurement_navigation_order_round_trips_through_draft_payload() {
+        let mut attempt = test_attempt();
+        attempt.document.sections = vec![
+            AssessmentSection {
+                id: Uuid::from_u128(301),
+                parent_section_id: None,
+                title: "Первый".into(),
+                description: None,
+                sort_order: 0,
+                items: vec![],
+            },
+            AssessmentSection {
+                id: Uuid::from_u128(302),
+                parent_section_id: None,
+                title: "Второй".into(),
+                description: None,
+                sort_order: 1,
+                items: vec![],
+            },
+        ];
+        let mut state = DraftState::from_attempt(&attempt);
+        assert!(
+            state.change_section_order(vec![Uuid::from_u128(302), Uuid::from_u128(301)], 100.0,)
+        );
+        let payload = state.payload(&attempt).unwrap();
+        assert_eq!(
+            payload.section_order,
+            vec![Uuid::from_u128(302), Uuid::from_u128(301)]
+        );
+        assert!(payload.answers.is_empty());
+    }
+
     fn test_attempt() -> AttemptDocument {
         AttemptDocument {
             id: Uuid::from_u128(3),
@@ -1415,6 +2177,7 @@ mod tests {
                 sections: vec![],
             },
             answers: vec![],
+            ui_metadata: Default::default(),
         }
     }
 

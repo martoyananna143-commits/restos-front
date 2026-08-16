@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
+use gloo_timers::future::TimeoutFuture;
 use uuid::Uuid;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
@@ -22,6 +23,21 @@ enum AssessmentTab {
     Company,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssessmentLibrarySection {
+    Library,
+    Company,
+}
+
+impl AssessmentLibrarySection {
+    const fn tab(self) -> AssessmentTab {
+        match self {
+            Self::Library => AssessmentTab::Library,
+            Self::Company => AssessmentTab::Company,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 enum AssessmentView {
     List,
@@ -39,6 +55,7 @@ const ASSESSMENT_TOUR_PREFERENCE_KEY: &str = "restos_ui_assessment_tour_v1";
 const ASSESSMENT_TOUR_TRIGGER_SELECTOR: &str = "[data-tour-trigger='assessment-templates']";
 const METHODOLOGY_TOUR_SELECTOR: &str = "[data-tour='methodology']";
 const METHODOLOGY_TOUR_TARGET_CLASS: &str = "assessment-methodology-tour-target";
+const LIBRARY_SEARCH_DEBOUNCE_MS: u32 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AdoptCtaState {
@@ -98,7 +115,7 @@ const TOUR_STEPS: [TourStep; 6] = [
     TourStep {
         target: TourTarget::AdoptAction,
         selector: "[data-tour='adopt-action']",
-        title: "Добавить в мои шаблоны",
+        title: "Добавить в мои замеры",
         body: "Создайте рабочую копию для выбранной компании. Повторное добавление будет заблокировано.",
     },
     TourStep {
@@ -143,12 +160,19 @@ fn is_active_tour_target(progress: Option<TourProgress>, target: TourTarget) -> 
     active_tour_target(progress) == Some(target)
 }
 
+fn assessment_entry_can_reuse_session(state: &AccountSessionState) -> bool {
+    matches!(state, AccountSessionState::Authenticated(_))
+}
+
 #[component]
-pub fn AssessmentsPage() -> Element {
+pub fn AssessmentsPage(
+    section: AssessmentLibrarySection,
+    on_section_change: EventHandler<AssessmentLibrarySection>,
+) -> Element {
     let session_adapter = use_context::<AccountSessionAdapter>();
     let api = use_context::<AssessmentApiClient>();
     let mut session = use_signal(|| AccountSessionState::Uninitialized);
-    let mut tab = use_signal(|| AssessmentTab::Library);
+    let mut tab = use_signal(|| section.tab());
     let mut view = use_signal(|| AssessmentView::List);
     let mut load_state = use_signal(|| LoadState::Loading);
     let mut error = use_signal(|| None::<AssessmentApiError>);
@@ -156,12 +180,21 @@ pub fn AssessmentsPage() -> Element {
     let mut company_templates = use_signal(Vec::<CompanyTemplateSummary>::new);
     let mut company_templates_resolved = use_signal(|| false);
     let mut switching_company = use_signal(|| None::<Uuid>);
-    let mut search = use_signal(String::new);
-    let mut activity_type = use_signal(String::new);
+    let search = use_signal(String::new);
+    let activity_type = use_signal(String::new);
+    let mut filter_generation = use_signal(|| 0_u64);
     let mut adopt_target = use_signal(|| None::<LibraryTemplateSummary>);
     let mut adopting = use_signal(|| false);
     let mut success = use_signal(|| None::<String>);
     let mut tour = use_signal(|| None::<TourProgress>);
+
+    use_effect(move || {
+        let requested = section.tab();
+        if tab() != requested {
+            tab.set(requested);
+            view.set(AssessmentView::List);
+        }
+    });
 
     let initial_adapter = session_adapter.clone();
     let initial_api = api.clone();
@@ -171,7 +204,13 @@ pub fn AssessmentsPage() -> Element {
         spawn(async move {
             load_state.set(LoadState::Loading);
             error.set(None);
-            match adapter.refresh().await {
+            let current = adapter.state();
+            let session_result = if assessment_entry_can_reuse_session(&current) {
+                Ok(current)
+            } else {
+                adapter.refresh().await
+            };
+            match session_result {
                 Ok(state) => {
                     session.set(state.clone());
                     if let AccountSessionState::Authenticated(authenticated) = state {
@@ -229,6 +268,7 @@ pub fn AssessmentsPage() -> Element {
                         onclick: move |_| {
                             view.set(AssessmentView::List);
                             tab.set(AssessmentTab::Library);
+                            on_section_change.call(AssessmentLibrarySection::Library);
                             tour.set(Some(TourProgress::first()));
                         },
                         "Как работать с шаблонами"
@@ -360,6 +400,7 @@ pub fn AssessmentsPage() -> Element {
                                     class: if tab() == AssessmentTab::Library { "assessment-tab is-active" } else { "assessment-tab" },
                                     onclick: move |_| {
                                         tab.set(AssessmentTab::Library);
+                                        on_section_change.call(AssessmentLibrarySection::Library);
                                         error.set(None);
                                     },
                                     "Библиотека шаблонов"
@@ -380,6 +421,7 @@ pub fn AssessmentsPage() -> Element {
                                             let client = client.clone();
                                             let adapter = adapter.clone();
                                             tab.set(AssessmentTab::Company);
+                                            on_section_change.call(AssessmentLibrarySection::Company);
                                             error.set(None);
                                             success.set(None);
                                             let Some(company_id) = selected_company(&adapter.state()) else {
@@ -419,6 +461,7 @@ pub fn AssessmentsPage() -> Element {
                                         onclick: move |_| {
                                             view.set(AssessmentView::List);
                                             tab.set(AssessmentTab::Company);
+                                            on_section_change.call(AssessmentLibrarySection::Company);
                                         },
                                         "Перейти в «Мои шаблоны»"
                                     }
@@ -497,61 +540,47 @@ pub fn AssessmentsPage() -> Element {
                                         active_tour_target: active_tour_target(tour()),
                                         search,
                                         activity_type,
-                                        on_apply: {
+                                        on_filter_change: {
                                             let client = api.clone();
                                             let adapter = session_adapter.clone();
-                                            move |_| {
+                                            move |debounced: bool| {
+                                                filter_generation += 1;
+                                                let generation = filter_generation();
                                                 let client = client.clone();
                                                 let adapter = adapter.clone();
-                                                let current = adapter.state();
                                                 let query = LibraryQuery {
                                                     activity_type: (!activity_type().is_empty()).then(|| activity_type()),
-                                                    query: (!search().trim().is_empty()).then(|| search()),
+                                                    query: (!search().trim().is_empty()).then(|| search().trim().to_string()),
                                                     limit: 50,
                                                     offset: 0,
                                                 };
                                                 spawn(async move {
+                                                    if debounced {
+                                                        TimeoutFuture::new(LIBRARY_SEARCH_DEBOUNCE_MS).await;
+                                                    }
+                                                    if filter_generation() != generation {
+                                                        return;
+                                                    }
                                                     load_state.set(LoadState::Loading);
+                                                    error.set(None);
+                                                    let current = adapter.state();
                                                     if let AccountSessionState::Authenticated(auth) = current {
-                                                        match list_library(&adapter, &client, &auth, query).await {
-                                                            Ok(items) => library.set(items),
-                                                            Err(problem) => error.set(Some(problem)),
+                                                        let result = list_library(&adapter, &client, &auth, query).await;
+                                                        if filter_generation() == generation {
+                                                            match result {
+                                                                Ok(items) => library.set(items),
+                                                                Err(problem) => error.set(Some(problem)),
+                                                            }
                                                         }
                                                     }
-                                                    session.set(adapter.state());
-                                                    load_state.set(LoadState::Ready);
+                                                    if filter_generation() == generation {
+                                                        session.set(adapter.state());
+                                                        load_state.set(LoadState::Ready);
+                                                    }
                                                 });
                                             }
                                         },
-                                        on_clear: {
-                                            let client = api.clone();
-                                            let adapter = session_adapter.clone();
-                                            move |_| {
-                                                let client = client.clone();
-                                                let adapter = adapter.clone();
-                                                search.set(String::new());
-                                                activity_type.set(String::new());
-                                                let current = adapter.state();
-                                                spawn(async move {
-                                                    load_state.set(LoadState::Loading);
-                                                    if let AccountSessionState::Authenticated(auth) = current {
-                                                        match list_library(
-                                                            &adapter,
-                                                            &client,
-                                                            &auth,
-                                                            LibraryQuery::first_page(),
-                                                        )
-                                                        .await
-                                                        {
-                                                            Ok(items) => library.set(items),
-                                                            Err(problem) => error.set(Some(problem)),
-                                                        }
-                                                    }
-                                                    session.set(adapter.state());
-                                                    load_state.set(LoadState::Ready);
-                                                });
-                                            }
-                                        },
+                                        on_adopt: move |template| adopt_target.set(Some(template)),
                                         on_open: {
                                             let client = api.clone();
                                             let adapter = session_adapter.clone();
@@ -611,6 +640,7 @@ pub fn AssessmentsPage() -> Element {
                                             } else {
                                                 view.set(AssessmentView::List);
                                                 tab.set(AssessmentTab::Company);
+                                                on_section_change.call(AssessmentLibrarySection::Company);
                                             }
                                         },
                                         on_adopt: move |_| {
@@ -682,7 +712,7 @@ pub fn AssessmentsPage() -> Element {
                                 };
                                 match result {
                                     Ok(_) => {
-                                        success.set(Some("Шаблон добавлен в вашу компанию".into()));
+                                        success.set(Some("Добавлено в мои замеры".into()));
                                         adopt_target.set(None);
                                         if let AccountSessionState::Authenticated(auth) = adapter.state() {
                                             if let Ok(items) = list_company(
@@ -796,12 +826,14 @@ fn LibraryList(
     templates: Vec<LibraryTemplateSummary>,
     company_templates: Vec<CompanyTemplateSummary>,
     active_tour_target: Option<TourTarget>,
-    search: Signal<String>,
-    activity_type: Signal<String>,
-    on_apply: EventHandler<()>,
-    on_clear: EventHandler<()>,
+    mut search: Signal<String>,
+    mut activity_type: Signal<String>,
+    on_filter_change: EventHandler<bool>,
     on_open: EventHandler<Uuid>,
+    on_adopt: EventHandler<LibraryTemplateSummary>,
 ) -> Element {
+    let active_filter_count =
+        usize::from(!search().trim().is_empty()) + usize::from(!activity_type().is_empty());
     rsx! {
         section { class: "assessment-content",
             div {
@@ -811,35 +843,74 @@ fn LibraryList(
                     .then_some("true"),
                 label { class: "assessment-search",
                     span { "Поиск по библиотеке" }
-                    input {
-                        value: "{search}",
-                        placeholder: "Название или код шаблона",
-                        oninput: move |event| search.set(event.value()),
-                        onkeydown: move |event| {
-                            if event.key() == Key::Enter {
-                                on_apply.call(());
+                    div { class: "assessment-filter-control",
+                        input {
+                            value: "{search}",
+                            placeholder: "Название или код шаблона",
+                            oninput: move |event| {
+                                search.set(event.value());
+                                on_filter_change.call(true);
+                            },
+                        }
+                        if !search().is_empty() {
+                            button {
+                                class: "assessment-field-clear",
+                                r#type: "button",
+                                aria_label: "Очистить поиск",
+                                onclick: move |_| {
+                                    search.set(String::new());
+                                    on_filter_change.call(false);
+                                },
+                                "×"
                             }
-                        },
+                        }
                     }
                 }
                 label { class: "assessment-filter",
                     span { "Тип активности" }
-                    select {
-                        value: "{activity_type}",
-                        onchange: move |event| activity_type.set(event.value()),
-                        option { value: "", "Все типы" }
-                        option { value: "evaluation", "Оценка" }
-                        option { value: "measurement", "Замер" }
-                        option { value: "walkthrough", "Обход" }
-                        option { value: "checklist", "Чек-лист" }
-                        option { value: "test", "Тест" }
-                        option { value: "survey", "Опрос" }
-                        option { value: "attestation", "Аттестация" }
+                    div { class: "assessment-filter-control",
+                        select {
+                            value: "{activity_type}",
+                            onchange: move |event| {
+                                activity_type.set(event.value());
+                                on_filter_change.call(false);
+                            },
+                            option { value: "", "Все типы" }
+                            option { value: "evaluation", "Оценка" }
+                            option { value: "measurement", "Замер" }
+                            option { value: "walkthrough", "Обход" }
+                            option { value: "checklist", "Чек-лист" }
+                            option { value: "test", "Тест" }
+                            option { value: "survey", "Опрос" }
+                            option { value: "attestation", "Аттестация" }
+                        }
+                        if !activity_type().is_empty() {
+                            button {
+                                class: "assessment-field-clear",
+                                r#type: "button",
+                                aria_label: "Очистить тип активности",
+                                onclick: move |_| {
+                                    activity_type.set(String::new());
+                                    on_filter_change.call(false);
+                                },
+                                "×"
+                            }
+                        }
                     }
                 }
-                div { class: "assessment-filter-actions",
-                    button { class: "assessment-button secondary", r#type: "button", onclick: move |_| on_clear.call(()), "Очистить" }
-                    button { class: "assessment-button primary", r#type: "button", onclick: move |_| on_apply.call(()), "Найти" }
+                if active_filter_count > 1 {
+                    div { class: "assessment-filter-actions",
+                        button {
+                            class: "assessment-button secondary",
+                            r#type: "button",
+                            onclick: move |_| {
+                                search.set(String::new());
+                                activity_type.set(String::new());
+                                on_filter_change.call(false);
+                            },
+                            "Сбросить фильтры"
+                        }
+                    }
                 }
             }
             div { class: "assessment-results-head",
@@ -861,9 +932,25 @@ fn LibraryList(
                                 template.version_id,
                                 &company_templates,
                             );
+                            let can_adopt = !adopted && template.published_at.is_some();
+                            let open_template = on_open;
+                            let keyboard_open = on_open;
+                            let adopt_template = on_adopt;
+                            let adoption_target = template.clone();
                             rsx! {
                                 article {
                                     class: if adopted { "assessment-card is-adopted" } else { "assessment-card" },
+                                    role: "button",
+                                    tabindex: "0",
+                                    aria_label: "Открыть шаблон {template.name}",
+                                    onclick: move |_| open_template.call(template_id),
+                                    onkeydown: move |event| {
+                                        let key = event.key();
+                                        if key == Key::Enter || key == Key::Character(" ".into()) {
+                                            event.prevent_default();
+                                            keyboard_open.call(template_id);
+                                        }
+                                    },
                                     "data-tour": if index == 0 { "library-card" } else { "" },
                                     "data-tour-active": (index == 0
                                         && active_tour_target == Some(TourTarget::LibraryCard))
@@ -884,11 +971,23 @@ fn LibraryList(
                                         span { "{template.section_count} разд. · {template.item_count} пунктов" }
                                     }
                                     button {
-                                        class: "assessment-link-button",
+                                        class: "assessment-button primary assessment-card-adopt",
                                         r#type: "button",
-                                        onclick: move |_| on_open.call(template_id),
-                                        "Подробнее",
-                                        span { aria_hidden: "true", " →" }
+                                        disabled: !can_adopt,
+                                        onkeydown: move |event| event.stop_propagation(),
+                                        onclick: move |event| {
+                                            event.stop_propagation();
+                                            if can_adopt {
+                                                adopt_template.call(adoption_target.clone());
+                                            }
+                                        },
+                                        if adopted {
+                                            "Добавлено в мои замеры"
+                                        } else if template.published_at.is_none() {
+                                            "Недоступно: шаблон не опубликован"
+                                        } else {
+                                            "Добавить в мои замеры"
+                                        }
                                     }
                                 }
                             }
@@ -938,7 +1037,7 @@ fn LibraryDetail(
                         AdoptCtaState::Adopt | AdoptCtaState::SelectCompany => {}
                     },
                     match cta_state {
-                        AdoptCtaState::Adopt => "Добавить в мои шаблоны",
+                        AdoptCtaState::Adopt => "Добавить в мои замеры",
                         AdoptCtaState::OpenCompanyCopy => "Открыть мой шаблон",
                         AdoptCtaState::SelectCompany => "Выберите компанию",
                     }
@@ -1057,12 +1156,68 @@ fn CompanyList(
                     body: "Добавьте готовый шаблон из библиотеки RestOS.",
                 }
             } else {
+                TemplateCategory {
+                    title: "Оценки сотрудников",
+                    description: "КЛН и практикумы, которые назначаются сотрудникам.",
+                    templates: templates.iter().filter(|value| value.activity_type != "walkthrough").cloned().collect(),
+                    on_open: on_open.clone(),
+                }
+                TemplateCategory {
+                    title: "Операционные обходы",
+                    description: "Обходы принадлежат ресторану и запускаются с главной кнопкой «Сделать замер».",
+                    templates: templates.iter().filter(|value| value.activity_type == "walkthrough").cloned().collect(),
+                    on_open: on_open.clone(),
+                }
+                section { class: "assessment-category", aria_labelledby: "product-measurement-category",
+                    div { class: "assessment-results-head",
+                        div {
+                            strong { id: "product-measurement-category", "Замеры продукта" }
+                            p { "Повторяемая оценка вкуса, внешнего вида, выхода и Ticket Time." }
+                        }
+                    }
+                    article { class: "assessment-card",
+                        div { class: "assessment-card-top",
+                            span { class: "assessment-status-badge", "Доступен" }
+                            span { class: "assessment-type-badge", "Замер" }
+                        }
+                        h2 { "Оценка вкуса и скорости" }
+                        p { class: "assessment-description", "Динамический бланк без заранее созданных пустых строк." }
+                        div { class: "assessment-card-meta",
+                            span { "Вкус /9" }
+                            span { "Скорость /3" }
+                            span { "Собственный итог /12" }
+                        }
+                        p { class: "assessment-origin", "Запуск доступен с главной кнопкой «Сделать замер»." }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TemplateCategory(
+    title: &'static str,
+    description: &'static str,
+    templates: Vec<CompanyTemplateSummary>,
+    on_open: EventHandler<CompanyTemplateSummary>,
+) -> Element {
+    rsx! {
+        section { class: "assessment-category", aria_label: "{title}",
+            div { class: "assessment-results-head",
+                div { strong { "{title}" } p { "{description}" } }
+                span { "{templates.len()}" }
+            }
+            if templates.is_empty() {
+                p { class: "assessment-empty-category", "В этой категории пока нет шаблонов." }
+            } else {
                 div { class: "assessment-grid",
                     for template in templates {
                         {
                             let version = preferred_version(&template);
                             let status = version.map(|value| value.status.as_str()).unwrap_or("archived");
                             let item = template.clone();
+                            let is_waiter_draft = template.code == "waiter-kln" && status == "draft";
                             rsx! {
                                 article { class: "assessment-card",
                                     div { class: "assessment-card-top",
@@ -1084,6 +1239,25 @@ fn CompanyList(
                                         div { class: "assessment-card-meta",
                                             span { "Версия {version.version}" }
                                             span { "Редакция {version.edit_revision}" }
+                                            span {
+                                                if is_imported_weighted(&template.code) {
+                                                    "Алгоритм weighted_v1"
+                                                } else {
+                                                    "Алгоритм completion_v1"
+                                                }
+                                            }
+                                            span {
+                                                if version.status == "published" && !is_waiter_draft {
+                                                    "Расчёт и запуск доступны"
+                                                } else {
+                                                    "Расчёт и запуск недоступны"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if is_waiter_draft {
+                                        p { class: "assessment-blocked-reason",
+                                            "Шаблон ожидает проверки двух весов и пока недоступен для назначения."
                                         }
                                     }
                                     button {
@@ -1101,6 +1275,20 @@ fn CompanyList(
             }
         }
     }
+}
+
+fn is_imported_weighted(code: &str) -> bool {
+    matches!(
+        code,
+        "cook-kln"
+            | "waiter-kln"
+            | "hostess-kln"
+            | "itci-kln"
+            | "kitchen-practicum"
+            | "bar-practicum"
+            | "restaurant-service-walkthrough"
+            | "production-walkthrough"
+    )
 }
 
 #[component]
@@ -1125,6 +1313,12 @@ fn CompanyDetail(template: CompanyTemplateSummary, on_back: EventHandler<()>) ->
                     div { strong { "{version.edit_revision}" } span { "Редакция" } }
                     div { strong { "{version.section_count}" } span { "Разделов" } }
                     div { strong { "{version.item_count}" } span { "Пунктов" } }
+                    div {
+                        strong {
+                            if version.status == "published" { "Доступен" } else { "Недоступен" }
+                        }
+                        span { "Расчёт" }
+                    }
                 }
             }
             if let Some(methodology) = template.methodology.as_ref() {
@@ -1603,6 +1797,35 @@ async fn list_company(
 mod tests {
     use super::*;
 
+    #[test]
+    fn authenticated_assessment_entry_reuses_shared_account_session() {
+        let state = AccountSessionState::Authenticated(AuthenticatedAccountSession {
+            access_token: crate::account_api::AccountAccessToken::from_server(
+                "synthetic-token".into(),
+            )
+            .unwrap(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+            bootstrap: crate::account_api::AccountBootstrap {
+                account: crate::account_api::BootstrapAccount {
+                    id: Uuid::from_u128(1),
+                    status: "active".into(),
+                    security_version: 1,
+                },
+                companies: Vec::new(),
+            },
+            selected_company: None,
+            company_selection_required: false,
+        });
+
+        assert!(assessment_entry_can_reuse_session(&state));
+        assert!(!assessment_entry_can_reuse_session(
+            &AccountSessionState::Uninitialized
+        ));
+        assert!(!assessment_entry_can_reuse_session(
+            &AccountSessionState::Anonymous
+        ));
+    }
+
     fn company_template(source: Option<Uuid>, name: &str) -> CompanyTemplateSummary {
         CompanyTemplateSummary {
             template_id: Uuid::from_u128(10),
@@ -1646,6 +1869,15 @@ mod tests {
             Uuid::from_u128(2),
             &[company_template(Some(source), "Любое название")]
         ));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn reviewed_import_codes_use_weighted_scoring_without_guessing_others() {
+        assert!(is_imported_weighted("cook-kln"));
+        assert!(is_imported_weighted("production-walkthrough"));
+        assert!(is_imported_weighted("waiter-kln"));
+        assert!(!is_imported_weighted("unreviewed-template"));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

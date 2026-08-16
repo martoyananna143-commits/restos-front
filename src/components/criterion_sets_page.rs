@@ -334,7 +334,7 @@ fn CriterionSetCard(
                 button { class: "btn-ghost btn-outline-soft", onclick: move |_| on_edit.call(edit_bottom.clone()), "Редактировать" }
             }
             if let Some(msg) = sync_msg() {
-                div { class: "error-msg", style: "margin-top:8px; font-size:12px;", "{msg}" }
+                div { class: "error-msg", role: "alert", style: "margin-top:8px; font-size:12px;", "{msg}" }
             }
         }
     }
@@ -391,7 +391,7 @@ fn CriterionSetForm(
 
                 div { class: "pad", style: "margin-top: 12px;",
                     {error().map(|message| rsx! {
-                        div { class: "error-card", style: "margin: 0 0 16px 0;",
+                        div { class: "error-card", role: "alert", style: "margin: 0 0 16px 0;",
                             p { class: "error-text", "{message}" }
                         }
                     })}
@@ -579,7 +579,7 @@ fn GoogleSheetView(token: String, on_back: EventHandler<()>, on_done: EventHandl
                     }
 
                     if let Some(err) = error() {
-                        div { class: "error-card", style: "margin-top:12px;",
+                        div { class: "error-card", role: "alert", style: "margin-top:12px;",
                             p { class: "error-text", "{err}" }
                         }
                     }
@@ -713,7 +713,7 @@ fn GoogleFolderView(
                     }
 
                     if let Some(err) = error() {
-                        div { class: "error-card", style: "margin-top:12px;",
+                        div { class: "error-card", role: "alert", style: "margin-top:12px;",
                             p { class: "error-text", "{err}" }
                         }
                     }

@@ -128,7 +128,7 @@ pub fn AiAssistantPage(
                     }
                     div { class: "pad", style: "margin-top: 12px;",
                         {chat_error().as_ref().map(|e| rsx! {
-                            div { class: "error-card", style: "margin: 0 0 12px 0; padding: 12px;",
+                            div { class: "error-card", role: "alert", style: "margin: 0 0 12px 0; padding: 12px;",
                                 p { class: "error-text", "{e}" }
                             }
                         })}
@@ -191,7 +191,7 @@ pub fn AiAssistantPage(
                     }
                     div { class: "pad", style: "margin-top: 12px;",
                         {gen_error().as_ref().map(|e| rsx! {
-                            div { class: "error-card", style: "margin: 0 0 12px 0; padding: 12px;",
+                            div { class: "error-card", role: "alert", style: "margin: 0 0 12px 0; padding: 12px;",
                                 p { class: "error-text", "{e}" }
                             }
                         })}
@@ -398,7 +398,7 @@ pub fn AiAssistantPage(
 
                         // Error
                         {save_error().as_ref().map(|e| rsx! {
-                            div { class: "error-card", style: "margin-top: 12px; padding: 12px;",
+                            div { class: "error-card", role: "alert", style: "margin-top: 12px; padding: 12px;",
                                 p { class: "error-text", "{e}" }
                             }
                         })}

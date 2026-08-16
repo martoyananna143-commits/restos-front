@@ -9,6 +9,7 @@ use gloo_net::http::{Request, Response};
 use web_sys::RequestCredentials;
 
 use crate::account_api::AccountAccessToken;
+use crate::assessment_attempt_api::AttemptDocument;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssessmentManagementApiError {
@@ -77,12 +78,19 @@ pub struct CompletionReceipt {
     pub answered_count: usize,
     pub required_count: usize,
     pub total_count: usize,
+    pub scoring_version: Option<u16>,
+    pub score_percent: Option<String>,
+    pub coverage: Option<String>,
+    pub critical_failure_count: Option<usize>,
+    pub stop_factor_count: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum CompletionAlgorithm {
     #[serde(rename = "completion_v1")]
     CompletionV1,
+    #[serde(rename = "weighted_v1")]
+    WeightedV1,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -101,6 +109,7 @@ pub struct AssignmentProgress {
 #[serde(deny_unknown_fields)]
 pub struct ManagerAssignment {
     pub id: Uuid,
+    pub venue_id: Option<Uuid>,
     pub status: AssignmentStatus,
     pub assigned_at: String,
     pub due_at: Option<String>,
@@ -116,7 +125,16 @@ pub struct ManagerAssignment {
 pub struct CreateAssignmentRequest {
     pub employee_profile_id: Uuid,
     pub template_version_id: Uuid,
+    pub venue_id: Option<Uuid>,
     pub due_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StartManagerMeasurementRequest {
+    pub employee_profile_id: Uuid,
+    pub template_version_id: Uuid,
+    pub venue_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -145,7 +163,7 @@ impl AssessmentManagementApiClient {
         Ok(Self { base_url })
     }
 
-    pub const fn routes() -> [&'static str; 6] {
+    pub const fn routes() -> [&'static str; 7] {
         [
             "/api/v1/account/companies/{company_id}/assessment-management/employees",
             "/api/v1/account/companies/{company_id}/assessment-management/templates",
@@ -153,6 +171,7 @@ impl AssessmentManagementApiClient {
             "/api/v1/account/companies/{company_id}/assessment-management/assignments",
             "/api/v1/account/companies/{company_id}/assessment-management/assignments/{assignment_id}",
             "/api/v1/account/companies/{company_id}/assessment-management/assignments/{assignment_id}/revoke",
+            "/api/v1/account/companies/{company_id}/assessment-management/measurements",
         ]
     }
 
@@ -234,6 +253,29 @@ impl AssessmentManagementApiClient {
             .request(
                 Request::post(&format!(
                     "{}/api/v1/account/companies/{company_id}/assessment-management/assignments",
+                    self.base_url
+                )),
+                token,
+            )
+            .json(body)
+            .map_err(|_| AssessmentManagementApiError::InvalidRequest)?
+            .send()
+            .await
+            .map_err(|_| AssessmentManagementApiError::NetworkUnavailable)?;
+        parse_response(response).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn start_measurement(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        body: &StartManagerMeasurementRequest,
+    ) -> Result<AttemptDocument, AssessmentManagementApiError> {
+        let response = self
+            .request(
+                Request::post(&format!(
+                    "{}/api/v1/account/companies/{company_id}/assessment-management/measurements",
                     self.base_url
                 )),
                 token,
@@ -371,18 +413,19 @@ mod tests {
 
     fn assignment_json() -> String {
         format!(
-            r#"{{"id":"{ASSIGNMENT}","status":"assigned","assigned_at":"2026-08-08T00:00:00Z","due_at":null,"revoked_at":null,"completed_at":null,"employee":{{"employee_profile_id":"{EMPLOYEE}","display_name":"Сотрудник","position_title":null}},"template":{{"template_id":"{TEMPLATE}","template_version_id":"{VERSION}","name":"Проверка","version":1}},"progress":{{"answered_count":0,"required_count":1,"total_count":2,"started_at":null,"last_saved_at":null,"submitted_at":null,"completion":null}}}}"#
+            r#"{{"id":"{ASSIGNMENT}","venue_id":null,"status":"assigned","assigned_at":"2026-08-08T00:00:00Z","due_at":null,"revoked_at":null,"completed_at":null,"employee":{{"employee_profile_id":"{EMPLOYEE}","display_name":"Сотрудник","position_title":null}},"template":{{"template_id":"{TEMPLATE}","template_version_id":"{VERSION}","name":"Проверка","version":1}},"progress":{{"answered_count":0,"required_count":1,"total_count":2,"started_at":null,"last_saved_at":null,"submitted_at":null,"completion":null}}}}"#
         )
     }
 
     #[wasm_bindgen_test]
-    fn stage23e_declares_exact_six_routes() {
-        assert_eq!(AssessmentManagementApiClient::routes().len(), 6);
+    fn stage23e_declares_exact_seven_routes() {
+        assert_eq!(AssessmentManagementApiClient::routes().len(), 7);
         assert_eq!(
             AssessmentManagementApiClient::routes()[0],
             "/api/v1/account/companies/{company_id}/assessment-management/employees"
         );
         assert!(AssessmentManagementApiClient::routes()[5].ends_with("/{assignment_id}/revoke"));
+        assert!(AssessmentManagementApiClient::routes()[6].ends_with("/measurements"));
     }
 
     #[wasm_bindgen_test]
@@ -422,10 +465,11 @@ mod tests {
         let body = CreateAssignmentRequest {
             employee_profile_id: EMPLOYEE,
             template_version_id: VERSION,
+            venue_id: None,
             due_at: Some("2026-09-01T09:00:00Z".into()),
         };
         let value = serde_json::to_value(body).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
         for forbidden in [
             "company_id",
             "status",

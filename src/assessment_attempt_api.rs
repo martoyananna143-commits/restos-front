@@ -27,12 +27,64 @@ pub enum AssessmentAttemptApiError {
 pub struct AssignmentSummary {
     pub id: Uuid,
     pub company_id: Uuid,
+    pub venue_id: Option<Uuid>,
     pub status: String,
     pub assigned_at: String,
     pub due_at: Option<String>,
+    pub submitted_at: Option<String>,
     pub template_name: String,
     pub template_version: i32,
     pub read_only: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssignmentHistoryPeriod {
+    Today,
+    Yesterday,
+    PreviousWeek,
+    PreviousMonth,
+    Custom { date_from: String, date_to: String },
+}
+
+impl AssignmentHistoryPeriod {
+    fn query(&self) -> Option<String> {
+        match self {
+            Self::Today => Some("history_period=today".into()),
+            Self::Yesterday => Some("history_period=yesterday".into()),
+            Self::PreviousWeek => Some("history_period=previous_week".into()),
+            Self::PreviousMonth => Some("history_period=previous_month".into()),
+            Self::Custom { date_from, date_to }
+                if valid_iso_date(date_from) && valid_iso_date(date_to) && date_from <= date_to =>
+            {
+                Some(format!(
+                    "history_period=custom&date_from={date_from}&date_to={date_to}"
+                ))
+            }
+            Self::Custom { .. } => None,
+        }
+    }
+}
+
+fn valid_iso_date(value: &str) -> bool {
+    value.len() == 10
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, value)| matches!(index, 4 | 7) || value.is_ascii_digit())
+}
+
+fn assignment_list_path(
+    company_id: Uuid,
+    period: &AssignmentHistoryPeriod,
+) -> Result<String, AssessmentAttemptApiError> {
+    let query = period
+        .query()
+        .ok_or(AssessmentAttemptApiError::InvalidRequest)?;
+    Ok(format!(
+        "/api/v1/account/assessment-assignments?company_id={company_id}&{query}"
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -40,9 +92,11 @@ pub struct AssignmentSummary {
 pub struct AssignmentDetail {
     pub id: Uuid,
     pub company_id: Uuid,
+    pub venue_id: Option<Uuid>,
     pub status: String,
     pub assigned_at: String,
     pub due_at: Option<String>,
+    pub submitted_at: Option<String>,
     pub template_name: String,
     pub template_version: i32,
     pub read_only: bool,
@@ -76,6 +130,12 @@ pub struct AssessmentItem {
     pub answer_type: String,
     pub required: bool,
     pub sort_order: i32,
+    pub weight: Option<String>,
+    pub min_value: Option<String>,
+    pub max_value: Option<String>,
+    pub passing_value: Option<String>,
+    pub evidence_mode: EvidenceMode,
+    pub criticality: Criticality,
     pub config: InputConfig,
     pub options: Vec<AssessmentOption>,
 }
@@ -85,6 +145,26 @@ pub struct AssessmentItem {
 pub struct InputConfig {
     pub placeholder: Option<String>,
     pub max_length: Option<usize>,
+    pub critical_threshold: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceMode {
+    None,
+    OptionalPhoto,
+    RequiredPhoto,
+    OptionalComment,
+    RequiredComment,
+    PhotoAndComment,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Criticality {
+    Normal,
+    Critical,
+    StopFactor,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -101,6 +181,7 @@ pub struct AttemptAnswer {
     pub item_id: Uuid,
     pub answer_type: String,
     pub value: Value,
+    pub comment: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -117,6 +198,15 @@ pub struct AttemptDocument {
     pub read_only_reason: Option<String>,
     pub document: TemplateDocument,
     pub answers: Vec<AttemptAnswer>,
+    #[serde(default)]
+    pub ui_metadata: AttemptUiMetadata,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptUiMetadata {
+    #[serde(default)]
+    pub section_order: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -124,6 +214,7 @@ pub struct AttemptDocument {
 pub struct ReplaceDraftRequest {
     pub expected_revision: i32,
     pub answers: Vec<AttemptAnswer>,
+    pub section_order: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -138,6 +229,8 @@ pub struct RevisionConflict {
     pub code: String,
     pub current_revision: i32,
     pub answers: Vec<AttemptAnswer>,
+    #[serde(default)]
+    pub ui_metadata: AttemptUiMetadata,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -148,12 +241,37 @@ pub struct CompletionResult {
     pub answered_count: usize,
     pub required_count: usize,
     pub total_count: usize,
+    pub scoring_version: Option<u16>,
+    pub numerator: Option<String>,
+    pub denominator: Option<String>,
+    pub score_percent: Option<String>,
+    pub coverage: Option<String>,
+    pub eligible_count: Option<usize>,
+    pub excluded_count: Option<usize>,
+    pub critical_failure_count: Option<usize>,
+    pub stop_factor_count: Option<usize>,
+    #[serde(default)]
+    pub sections: Vec<WeightedSectionResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WeightedSectionResult {
+    pub section_id: Uuid,
+    pub section_code: String,
+    pub title: String,
+    pub score_percent: Option<String>,
+    pub coverage: String,
+    pub critical_failure_count: usize,
+    pub stop_factor_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum CompletionAlgorithm {
     #[serde(rename = "completion_v1")]
     CompletionV1,
+    #[serde(rename = "weighted_v1")]
+    WeightedV1,
 }
 
 #[derive(Clone, Debug)]
@@ -186,8 +304,10 @@ impl AssessmentAttemptApiClient {
     pub async fn list_assignments(
         &self,
         token: &AccountAccessToken,
+        company_id: Uuid,
+        period: &AssignmentHistoryPeriod,
     ) -> Result<Vec<AssignmentSummary>, AssessmentAttemptApiError> {
-        self.get("/api/v1/account/assessment-assignments", token)
+        self.get(&assignment_list_path(company_id, period)?, token)
             .await
     }
 
@@ -355,7 +475,7 @@ mod tests {
 
     fn assignment_json() -> String {
         format!(
-            r#"{{"id":"{ASSIGNMENT_ID}","company_id":"{COMPANY_ID}","status":"assigned","assigned_at":"2026-08-07T00:00:00Z","due_at":null,"template_name":"Pilot","template_version":1,"read_only":false}}"#
+            r#"{{"id":"{ASSIGNMENT_ID}","company_id":"{COMPANY_ID}","venue_id":null,"status":"assigned","assigned_at":"2026-08-07T00:00:00Z","due_at":null,"submitted_at":null,"template_name":"Pilot","template_version":1,"read_only":false}}"#
         )
     }
 
@@ -382,6 +502,24 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn user_journey_assignment_period_query_is_typed_and_bounded() {
+        assert_eq!(
+            assignment_list_path(COMPANY_ID, &AssignmentHistoryPeriod::Yesterday).unwrap(),
+            format!(
+                "/api/v1/account/assessment-assignments?company_id={COMPANY_ID}&history_period=yesterday"
+            )
+        );
+        assert!(assignment_list_path(
+            COMPANY_ID,
+            &AssignmentHistoryPeriod::Custom {
+                date_from: "2026-08-14".into(),
+                date_to: "2026-08-01".into(),
+            }
+        )
+        .is_err());
+    }
+
+    #[wasm_bindgen_test]
     fn stage23c_api_dtos_decode_list_detail_document_and_nullable_fields() {
         let summary: AssignmentSummary = serde_json::from_str(&assignment_json()).unwrap();
         assert_eq!(summary.id, ASSIGNMENT_ID);
@@ -396,7 +534,7 @@ mod tests {
         assert_eq!(attempt.submitted_at, None);
         assert_eq!(attempt.read_only_reason, None);
         let detail = format!(
-            r#"{{"id":"{ASSIGNMENT_ID}","company_id":"{COMPANY_ID}","status":"assigned","assigned_at":"2026-08-07T00:00:00Z","due_at":null,"template_name":"Pilot","template_version":1,"read_only":false,"document":{{"version_id":"{COMPANY_ID}","sections":[]}}}}"#
+            r#"{{"id":"{ASSIGNMENT_ID}","company_id":"{COMPANY_ID}","venue_id":null,"status":"assigned","assigned_at":"2026-08-07T00:00:00Z","due_at":null,"template_name":"Pilot","template_version":1,"read_only":false,"document":{{"version_id":"{COMPANY_ID}","sections":[]}}}}"#
         );
         assert!(serde_json::from_str::<AssignmentDetail>(&detail).is_ok());
     }
@@ -425,11 +563,14 @@ mod tests {
                 item_id: Uuid::from_u128(4),
                 answer_type: "boolean".into(),
                 value: Value::Bool(true),
+                comment: None,
             }],
+            section_order: vec![Uuid::from_u128(5)],
         };
         let encoded = serde_json::to_value(body).unwrap();
         assert_eq!(encoded["expected_revision"], 7);
         assert_eq!(encoded["answers"].as_array().unwrap().len(), 1);
+        assert_eq!(encoded["section_order"].as_array().unwrap().len(), 1);
         assert!(encoded.get("expectedRevision").is_none());
         for forbidden in ["token", "cookie", "score", "passed", "correct", "weight"] {
             assert!(encoded.get(forbidden).is_none());
@@ -448,7 +589,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn stage23c_completion_accepts_completion_only_shape() {
+    fn completion_accepts_legacy_and_weighted_algorithms_without_internal_fields() {
         let value = r#"{"scoring_algorithm":"completion_v1","submitted_at":"2026-01-01T00:00:00Z","answered_count":2,"required_count":1,"total_count":2}"#;
         assert!(serde_json::from_str::<CompletionResult>(value).is_ok());
         assert!(
@@ -458,7 +599,7 @@ mod tests {
         assert!(serde_json::from_str::<CompletionResult>(
             &value.replace("completion_v1", "weighted_v1")
         )
-        .is_err());
+        .is_ok());
     }
 
     #[wasm_bindgen_test]
