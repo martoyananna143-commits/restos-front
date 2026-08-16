@@ -4,7 +4,6 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use wasm_bindgen::{JsCast, JsValue};
 
-#[cfg(test)]
 const MOBILE_LAUNCH_MAX_WIDTH_PX: f64 = 600.0;
 const MOBILE_LAUNCH_TIMEOUT_MS: u32 = 2_600;
 const MOBILE_LAUNCH_SESSION_KEY: &str = "restos-launch-seen-v1";
@@ -58,6 +57,13 @@ fn reduced_motion_requested() -> bool {
         .is_some_and(|query| query.matches())
 }
 
+fn mobile_launch_viewport_width() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.inner_width().ok())
+        .and_then(|width| width.as_f64())
+        .unwrap_or(f64::NAN)
+}
+
 fn request_mobile_launch_playback() -> bool {
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return false;
@@ -75,7 +81,6 @@ fn request_mobile_launch_playback() -> bool {
     play.call0(&video).is_ok()
 }
 
-#[cfg(test)]
 fn mobile_launch_allowed(width_px: f64, reduced_motion: bool) -> bool {
     width_px.is_finite()
         && width_px > 0.0
@@ -85,7 +90,10 @@ fn mobile_launch_allowed(width_px: f64, reduced_motion: bool) -> bool {
 
 #[component]
 pub fn MobileLaunchAnimation() -> Element {
-    let mut visible = use_signal(|| !mobile_launch_was_seen() && !reduced_motion_requested());
+    let mut visible = use_signal(|| {
+        !mobile_launch_was_seen()
+            && mobile_launch_allowed(mobile_launch_viewport_width(), reduced_motion_requested())
+    });
     let mut playback_failed = use_signal(|| false);
 
     use_effect(move || {
@@ -447,7 +455,9 @@ mod tests {
             .unwrap_or_default();
         assert!(component.contains("/brand/restos-launch-mobile.mp4"));
         assert!(component.contains("!mobile_launch_was_seen()"));
-        assert!(component.contains("!reduced_motion_requested()"));
+        assert!(component.contains("mobile_launch_allowed("));
+        assert!(component.contains("mobile_launch_viewport_width()"));
+        assert!(component.contains("reduced_motion_requested()"));
         assert!(component.contains("autoplay: true"));
         assert!(component.contains("muted: true"));
         assert!(component.contains("playsinline: true"));
