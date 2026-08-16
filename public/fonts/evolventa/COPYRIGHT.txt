@@ -1,0 +1,10 @@
+Copyright (c) 2016 by Alex I. Kuznetsov.
+
+This font is free software. You are allowed to distribute and/or modify it under the terms of either (or both) of the following two licenses (your choice):
+
+1) GNU General Public License version 2 (https://gnu.org/licenses/old-licenses/gpl-2.0.txt)
+2) The LaTeX Project Public License version 1.3c or (at your option) any later version (http://www.latex-project.org/lppl.txt)
+
+Contains work kindly released to the open source community by URW++ Design and Development GmbH as "URW Gothic L" (version 001.005) with the following copyright notice: Copyright URW Software, Copyright 1996 by URW.
+
+Original URW fonts can be obtained at the Evolventa website (https://evolventa.github.io).

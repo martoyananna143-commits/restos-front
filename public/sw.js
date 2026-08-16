@@ -9,7 +9,7 @@
  * On activation the old caches are cleaned up so storage doesn't grow unbounded.
  */
 
-const APP_VERSION = "v1";
+const APP_VERSION = "brand-experience-stage2-v1";
 const SHELL_CACHE = `restos-shell-${APP_VERSION}`;
 const STATIC_CACHE = `restos-static-${APP_VERSION}`;
 const ALL_CACHES = [SHELL_CACHE, STATIC_CACHE];
