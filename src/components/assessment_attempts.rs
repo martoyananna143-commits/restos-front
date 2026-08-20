@@ -1,8 +1,15 @@
 //! Employee-facing assigned assessment, draft, conflict, and completion flow.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+};
 
 use dioxus::prelude::*;
+use futures_util::{
+    future::{select, Either},
+    pin_mut,
+};
 use gloo_timers::future::TimeoutFuture;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -26,6 +33,7 @@ use crate::{
 use super::team_management::DraftTaskActions;
 
 const AUTOSAVE_DEBOUNCE_MS: u32 = 750;
+const ASSESSMENT_REQUEST_TIMEOUT_MS: u32 = 20_000;
 const MAX_ANSWERS: usize = 5_000;
 const DEFAULT_TEXT_LIMIT: usize = 10_000;
 const MAX_MULTI_OPTIONS: usize = 100;
@@ -63,6 +71,15 @@ fn remaining_debounce_ms(last_change_ms: f64, now_ms: f64) -> u32 {
         0
     } else {
         remaining.ceil().min(f64::from(u32::MAX)) as u32
+    }
+}
+
+async fn bounded_request<T>(request: impl Future<Output = T>) -> Option<T> {
+    let timeout = TimeoutFuture::new(ASSESSMENT_REQUEST_TIMEOUT_MS);
+    pin_mut!(request, timeout);
+    match select(request, timeout).await {
+        Either::Left((value, _)) => Some(value),
+        Either::Right(((), _)) => None,
     }
 }
 
@@ -415,6 +432,16 @@ fn submit_after_save(status: SaveStatus, submit_requested: bool) -> bool {
     status == SaveStatus::Saved && submit_requested
 }
 
+fn release_submit_intent(
+    mut submit_requested: Signal<bool>,
+    mut submitting: Signal<bool>,
+    mut confirming_submit: Signal<bool>,
+) {
+    submit_requested.set(false);
+    submitting.set(false);
+    confirming_submit.set(false);
+}
+
 fn needs_followup_save(state: &DraftState) -> bool {
     state.status == SaveStatus::Dirty || state.pending_after_flight
 }
@@ -657,6 +684,43 @@ async fn submit_with_one_refresh(
 }
 
 #[cfg(target_arch = "wasm32")]
+async fn result_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    company_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<AssessmentResultDetail, AssessmentAttemptApiError> {
+    match api.result(token, company_id, attempt_id).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.result(&refreshed, company_id, attempt_id).await
+        }
+        result => result,
+    }
+}
+
+fn completion_from_result(result: AssessmentResultDetail) -> CompletionResult {
+    CompletionResult {
+        scoring_algorithm: result.scoring_algorithm,
+        submitted_at: result.submitted_at,
+        answered_count: result.answered_count,
+        required_count: result.required_count,
+        total_count: result.total_count,
+        scoring_version: None,
+        numerator: None,
+        denominator: None,
+        score_percent: result.score_percent,
+        coverage: None,
+        eligible_count: None,
+        excluded_count: None,
+        critical_failure_count: Some(result.critical_failure_count),
+        stop_factor_count: Some(result.stop_factor_count),
+        sections: Vec::new(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn history_with_one_refresh(
     api: &AssessmentAttemptApiClient,
     session: &AccountSessionAdapter,
@@ -686,23 +750,6 @@ async fn assignments_with_one_refresh(
         Err(AssessmentAttemptApiError::AuthenticationRequired) => {
             let refreshed = refreshed_token(session).await?;
             api.list_assignments(&refreshed, company_id, period).await
-        }
-        result => result,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn result_with_one_refresh(
-    api: &AssessmentAttemptApiClient,
-    session: &AccountSessionAdapter,
-    token: &AccountAccessToken,
-    company_id: Uuid,
-    attempt_id: Uuid,
-) -> Result<AssessmentResultDetail, AssessmentAttemptApiError> {
-    match api.result(token, company_id, attempt_id).await {
-        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
-            let refreshed = refreshed_token(session).await?;
-            api.result(&refreshed, company_id, attempt_id).await
         }
         result => result,
     }
@@ -1447,6 +1494,46 @@ fn scroll_to_attempt_section(index: usize) {
     section.scroll_into_view();
 }
 
+fn next_unanswered_item_id(
+    attempt: &AttemptDocument,
+    answers: &BTreeMap<Uuid, AttemptAnswer>,
+    current_item_id: Uuid,
+) -> Option<Uuid> {
+    let items = attempt
+        .document
+        .sections
+        .iter()
+        .flat_map(|section| section.items.iter())
+        .collect::<Vec<_>>();
+    let current = items.iter().position(|item| item.id == current_item_id)?;
+    items
+        .iter()
+        .skip(current + 1)
+        .chain(items.iter().take(current))
+        .find(|item| !answers.contains_key(&item.id))
+        .map(|item| item.id)
+}
+
+fn focus_attempt_element(id: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(element) = document.get_element_by_id(id) else {
+        return;
+    };
+    element.scroll_into_view();
+    if let Some(element) = element.dyn_ref::<web_sys::HtmlElement>() {
+        let _ = element.focus();
+    }
+}
+
+fn schedule_attempt_focus(id: String) {
+    spawn(async move {
+        TimeoutFuture::new(0).await;
+        focus_attempt_element(&id);
+    });
+}
+
 fn visible_attempt_section(section_count: usize) -> Option<usize> {
     let document = web_sys::window()?.document()?;
     let container_top = document
@@ -1609,9 +1696,15 @@ fn AttemptEditor(
     });
 
     rsx! { section { class: "attempt-editor", aria_labelledby: "attempt-title",
-        header { class: "attempt-editor-header", button { class: "btn-ghost", r#type: "button", onclick: move |_| { attempt_generation += 1; attempt.set(None); draft.set(None); completion.set(None); }, "← К замерам" } h1 { id: "attempt-title", "Прохождение оценки" } p { "Заполнено {answered} из {total}" } }
-        if !read_only { button { class: "attempt-quick-task-button", r#type: "button", onclick: move |_| { quick_task_error.set(None); quick_task_created.set(false); quick_task_open.set(true); }, "+ Быстрая задача" } }
-        div { class: "attempt-save-status", role: "status", aria_live: "polite", "{save_label(status)}" }
+        header { class: "attempt-editor-header",
+            div { class: "attempt-editor-toolbar",
+                button { class: "btn-ghost attempt-editor-back", r#type: "button", onclick: move |_| { attempt_generation += 1; attempt.set(None); draft.set(None); completion.set(None); }, "← К замерам" }
+                div { class: "attempt-editor-heading", h1 { id: "attempt-title", "Прохождение оценки" } p { "Отвечено {answered} из {total}" } }
+                if !read_only { button { class: "attempt-quick-task-button", r#type: "button", onclick: move |_| { quick_task_error.set(None); quick_task_created.set(false); quick_task_open.set(true); }, "+ Быстрая задача" } }
+                div { class: "attempt-save-status", role: "status", aria_live: "polite", "{save_label(status)}" }
+            }
+            progress { class: "attempt-editor-progress", max: "{total.max(1)}", value: "{answered.min(total)}", aria_label: "Отвечено {answered} из {total}" }
+        }
         if let Some(reason) = active.read_only_reason.as_ref() { p { class: "account-safe-error", "{read_only_message(reason)}" } }
         if completion().is_none() {
             div { class: "attempt-editor-layout",
@@ -1787,9 +1880,19 @@ fn AttemptEditor(
                 p { "Результат сохранён в RestOS и доступен ответственному руководителю." }
             }
         }
-        else if !read_only { button { class: "btn-primary", r#type: "button", disabled: submit_preparation(status, read_only, submitting()) == SubmitPreparation::Blocked, onclick: move |_| confirming_submit.set(true), "Завершить оценку" } }
+        else if !read_only { button { id: "attempt-complete-action", class: "btn-primary attempt-complete-action", r#type: "button", disabled: submit_preparation(status, read_only, submitting()) == SubmitPreparation::Blocked, onclick: move |_| confirming_submit.set(true), "Завершить оценку" } }
         if confirming_submit() { div { class: "attempt-confirm", role: "dialog", aria_modal: "true", aria_labelledby: "submit-confirm-title", h2 { id: "submit-confirm-title", "Отправить оценку?" } p { "После отправки ответы нельзя будет изменить." }
-            button { class: "btn-primary", r#type: "button", disabled: submitting(), onclick: move |_| { submitting.set(true); submit_requested.set(true); submit_generation += 1; match submit_preparation(status, read_only, false) { SubmitPreparation::SubmitNow => start_submit(submit_active.id, submit_api.clone(), submit_session.clone(), attempt_generation, lifecycle_epoch, submit_generation, submit_requested, submitting, confirming_submit, completion, draft), SubmitPreparation::SaveFirst => schedule_autosave(submit_active.clone(), draft, save_generation, attempt_generation, lifecycle_epoch, submit_api.clone(), submit_session.clone(), true, submit_generation, submit_requested, submitting, confirming_submit, completion), SubmitPreparation::Blocked => { submit_requested.set(false); submitting.set(false); } } }, if submitting() { "Подготовка..." } else { "Подтвердить" } }
+            button { class: "btn-primary", r#type: "button", disabled: submitting(), onclick: move |_| {
+                submitting.set(true);
+                submit_requested.set(true);
+                submit_generation += 1;
+                let live_status = draft().map(|state| state.status).unwrap_or(SaveStatus::Saved);
+                match submit_preparation(live_status, read_only, false) {
+                    SubmitPreparation::SubmitNow => start_submit(submit_active.id, submit_api.clone(), submit_session.clone(), attempt_generation, lifecycle_epoch, submit_generation, submit_requested, submitting, confirming_submit, completion, draft),
+                    SubmitPreparation::SaveFirst => schedule_autosave(submit_active.clone(), draft, save_generation, attempt_generation, lifecycle_epoch, submit_api.clone(), submit_session.clone(), true, submit_generation, submit_requested, submitting, confirming_submit, completion),
+                    SubmitPreparation::Blocked => release_submit_intent(submit_requested, submitting, confirming_submit),
+                }
+            }, if submitting() { "Подготовка..." } else { "Подтвердить" } }
             button { class: "btn-ghost", r#type: "button", disabled: submitting(), onclick: move |_| confirming_submit.set(false), "Отмена" }
         } }
         if quick_task_open() { div { class: "attempt-confirm quick-task-dialog", role: "dialog", aria_modal: "true", aria_labelledby: "quick-task-title",
@@ -1856,12 +1959,14 @@ fn AnswerControl(
     let answer_type = item.answer_type.clone();
     let change_answer_type = answer_type.clone();
     let max_length = item.config.max_length;
+    let evidence_mode = item.evidence_mode;
     let option_ids = item
         .options
         .iter()
         .map(|option| option.id)
         .collect::<BTreeSet<_>>();
     let change_active = active.clone();
+    let advance_active = active.clone();
     let change_api = api.clone();
     let change_session = session.clone();
     let comment_active = active.clone();
@@ -1876,11 +1981,34 @@ fn AnswerControl(
             submitting.set(false);
             submit_generation += 1;
         }
-        let answer = answer_for_parts(item_id, &change_answer_type, max_length, &option_ids, value);
-        let changed = draft
-            .write()
-            .as_mut()
-            .is_some_and(|state| state.change(answer, item_id, js_sys::Date::now()));
+        let mut answer =
+            answer_for_parts(item_id, &change_answer_type, max_length, &option_ids, value);
+        let mut required_comment = false;
+        let mut next_item = None;
+        let changed = draft.write().as_mut().is_some_and(|state| {
+            if let Some(answer) = answer.as_mut() {
+                answer.comment = state
+                    .answers
+                    .get(&item_id)
+                    .and_then(|current| current.comment.clone());
+            }
+            let changed = state.change(answer, item_id, js_sys::Date::now());
+            if changed && change_answer_type == "boolean" {
+                required_comment = matches!(
+                    evidence_mode,
+                    crate::assessment_attempt_api::EvidenceMode::RequiredComment
+                        | crate::assessment_attempt_api::EvidenceMode::PhotoAndComment
+                ) && state
+                    .answers
+                    .get(&item_id)
+                    .and_then(|answer| answer.comment.as_deref())
+                    .is_none_or(|comment| comment.trim().is_empty());
+                if !required_comment {
+                    next_item = next_unanswered_item_id(&advance_active, &state.answers, item_id);
+                }
+            }
+            changed
+        });
         if !changed {
             return;
         }
@@ -1900,6 +2028,15 @@ fn AnswerControl(
             confirming_submit,
             completion,
         );
+        if change_answer_type == "boolean" {
+            if required_comment {
+                schedule_attempt_focus(format!("attempt-observation-{item_id}"));
+            } else if let Some(next_item) = next_item {
+                schedule_attempt_focus(format!("attempt-question-{next_item}"));
+            } else {
+                schedule_attempt_focus("attempt-complete-action".into());
+            }
+        }
     });
     let boolean_change = change;
     let integer_change = change;
@@ -1958,11 +2095,11 @@ fn AnswerControl(
         Some(false) if answer_type == "boolean" => "attempt-question attempt-question--negative",
         _ => "attempt-question",
     };
-    rsx! { fieldset { class: question_class, disabled: read_only, legend { "{label}" } if let Some(guidance) = item.guidance.as_ref() { p { class: "attempt-guidance", "{guidance}" } }
+    rsx! { fieldset { id: "attempt-question-{item_id}", class: question_class, tabindex: "-1", disabled: read_only, legend { "{label}" } if let Some(guidance) = item.guidance.as_ref() { p { class: "attempt-guidance", "{guidance}" } }
         match answer_type.as_str() {
             "boolean" => rsx! { div { class: "attempt-boolean-actions",
-                button { class: if current.as_ref().and_then(|a| a.value.as_bool()) == Some(true) { "is-selected is-positive" } else { "" }, r#type: "button", onclick: move |_| boolean_change.call(json!(true)), "✓ Да" }
-                button { class: if current.as_ref().and_then(|a| a.value.as_bool()) == Some(false) { "is-selected is-negative" } else { "" }, r#type: "button", onclick: move |_| boolean_change.call(json!(false)), "× Нет" }
+                button { class: if current.as_ref().and_then(|a| a.value.as_bool()) == Some(true) { "is-selected is-positive" } else { "" }, r#type: "button", aria_pressed: current.as_ref().and_then(|a| a.value.as_bool()) == Some(true), onclick: move |_| boolean_change.call(json!(true)), "✓ Да" }
+                button { class: if current.as_ref().and_then(|a| a.value.as_bool()) == Some(false) { "is-selected is-negative" } else { "" }, r#type: "button", aria_pressed: current.as_ref().and_then(|a| a.value.as_bool()) == Some(false), onclick: move |_| boolean_change.call(json!(false)), "× Нет" }
                 button { r#type: "button", disabled: current.is_none(), onclick: move |_| {
                     if let Some(document) = web_sys::window().and_then(|window| window.document()) {
                         if let Some(field) = document.get_element_by_id(&format!("attempt-observation-{item_id}")) {
@@ -2029,7 +2166,7 @@ fn schedule_autosave(
     submit_generation: Signal<u64>,
     mut submit_requested: Signal<bool>,
     mut submitting: Signal<bool>,
-    confirming_submit: Signal<bool>,
+    mut confirming_submit: Signal<bool>,
     completion: Signal<Option<CompletionResult>>,
 ) {
     let scheduled_generation = save_generation();
@@ -2067,9 +2204,27 @@ fn schedule_autosave(
             return;
         }
         let Some(state_snapshot) = draft() else {
+            release_submit_intent(submit_requested, submitting, confirming_submit);
             return;
         };
+        if submit_after_save(state_snapshot.status, submit_requested()) {
+            start_submit(
+                active.id,
+                api,
+                session,
+                attempt_generation,
+                lifecycle_epoch,
+                submit_generation,
+                submit_requested,
+                submitting,
+                confirming_submit,
+                completion,
+                draft,
+            );
+            return;
+        }
         if state_snapshot.status != SaveStatus::Dirty {
+            release_submit_intent(submit_requested, submitting, confirming_submit);
             return;
         }
         let payload = match state_snapshot.payload(&active) {
@@ -2078,23 +2233,39 @@ fn schedule_autosave(
                 if let Some(state) = draft.write().as_mut() {
                     state.status = SaveStatus::ValidationError;
                 }
+                release_submit_intent(submit_requested, submitting, confirming_submit);
                 return;
             }
         };
         let snapshot_generation = state_snapshot.dirty_generation;
         let token = match session.state() {
             AccountSessionState::Authenticated(value) => value.access_token,
-            _ => return,
+            _ => {
+                if let Some(state) = draft.write().as_mut() {
+                    state.in_flight = false;
+                    state.status = SaveStatus::Failed;
+                }
+                release_submit_intent(submit_requested, submitting, confirming_submit);
+                return;
+            }
         };
         if let Some(state) = draft.write().as_mut() {
             state.in_flight = true;
             state.status = SaveStatus::Saving;
         }
-        let result =
-            replace_draft_with_one_refresh(&api, &session, &token, active.id, &payload).await;
+        let result = bounded_request(replace_draft_with_one_refresh(
+            &api, &session, &token, active.id, &payload,
+        ))
+        .await
+        .unwrap_or(Err(AssessmentAttemptApiError::NetworkUnavailable));
         if attempt_generation() != scheduled_attempt_generation
             || lifecycle_epoch() != scheduled_lifecycle_epoch
         {
+            if submit_requested() {
+                submit_requested.set(false);
+                submitting.set(false);
+                confirming_submit.set(false);
+            }
             return;
         }
         match result {
@@ -2107,16 +2278,14 @@ fn schedule_autosave(
                 if let Some(state) = draft.write().as_mut() {
                     state.accept_conflict(conflict);
                 }
-                submit_requested.set(false);
-                submitting.set(false);
+                release_submit_intent(submit_requested, submitting, confirming_submit);
             }
             Err(_) => {
                 if let Some(state) = draft.write().as_mut() {
                     state.in_flight = false;
                     state.status = SaveStatus::Failed;
                 }
-                submit_requested.set(false);
-                submitting.set(false);
+                release_submit_intent(submit_requested, submitting, confirming_submit);
             }
         }
         if draft().is_some_and(|state| submit_after_save(state.status, submit_requested())) {
@@ -2174,16 +2343,68 @@ fn start_submit(
     let operation_lifecycle_epoch = lifecycle_epoch();
     let operation_submit_generation = submit_generation();
     spawn(async move {
-        let token = match session.state() {
-            AccountSessionState::Authenticated(value) => value.access_token,
-            _ => return,
+        let (token, company_id) = match session.state() {
+            AccountSessionState::Authenticated(value) => {
+                let Some(company_id) = value.selected_company.map(|id| id.0) else {
+                    submit_requested.set(false);
+                    submitting.set(false);
+                    confirming_submit.set(false);
+                    if let Some(state) = draft.write().as_mut() {
+                        state.status = SaveStatus::SubmitFailed;
+                    }
+                    return;
+                };
+                (value.access_token, company_id)
+            }
+            _ => {
+                submit_requested.set(false);
+                submitting.set(false);
+                confirming_submit.set(false);
+                if let Some(state) = draft.write().as_mut() {
+                    state.status = SaveStatus::SubmitFailed;
+                }
+                return;
+            }
         };
-        let result = submit_with_one_refresh(&api, &session, &token, attempt_id).await;
+        let submitted =
+            bounded_request(submit_with_one_refresh(&api, &session, &token, attempt_id)).await;
+        let result = match submitted {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(problem)) => {
+                match bounded_request(result_with_one_refresh(
+                    &api, &session, &token, company_id, attempt_id,
+                ))
+                .await
+                {
+                    Some(Ok(value)) if value.status == "submitted" => {
+                        Ok(completion_from_result(value))
+                    }
+                    _ => Err(problem),
+                }
+            }
+            None => {
+                match bounded_request(result_with_one_refresh(
+                    &api, &session, &token, company_id, attempt_id,
+                ))
+                .await
+                {
+                    Some(Ok(value)) if value.status == "submitted" => {
+                        Ok(completion_from_result(value))
+                    }
+                    _ => Err(AssessmentAttemptApiError::NetworkUnavailable),
+                }
+            }
+        };
         if attempt_generation() != operation_attempt_generation
             || lifecycle_epoch() != operation_lifecycle_epoch
             || submit_generation() != operation_submit_generation
             || !submit_requested()
         {
+            if submit_generation() == operation_submit_generation {
+                submit_requested.set(false);
+                submitting.set(false);
+                confirming_submit.set(false);
+            }
             return;
         }
         submit_requested.set(false);
@@ -2586,6 +2807,56 @@ mod tests {
         assert!(submit_after_save(SaveStatus::Saved, true));
         assert!(!submit_after_save(SaveStatus::Dirty, true));
         assert!(!submit_after_save(SaveStatus::Saved, false));
+    }
+
+    #[wasm_bindgen_test]
+    fn completion_requests_have_a_finite_ui_timeout() {
+        assert_eq!(ASSESSMENT_REQUEST_TIMEOUT_MS, 20_000);
+        assert!(ASSESSMENT_REQUEST_TIMEOUT_MS < 60_000);
+    }
+
+    #[wasm_bindgen_test]
+    fn boolean_auto_advance_targets_the_next_unanswered_item() {
+        let mut first = item("boolean");
+        first.id = Uuid::from_u128(11);
+        let mut second = item("boolean");
+        second.id = Uuid::from_u128(12);
+        let mut third = item("boolean");
+        third.id = Uuid::from_u128(13);
+        let mut attempt = test_attempt();
+        attempt
+            .document
+            .sections
+            .push(crate::assessment_attempt_api::AssessmentSection {
+                id: Uuid::from_u128(10),
+                parent_section_id: None,
+                title: "Section".into(),
+                description: None,
+                sort_order: 0,
+                items: vec![first.clone(), second.clone(), third.clone()],
+            });
+        let mut answers = BTreeMap::new();
+        answers.insert(
+            first.id,
+            answer_for(&first, json!(true)).expect("valid synthetic answer"),
+        );
+        assert_eq!(
+            next_unanswered_item_id(&attempt, &answers, first.id),
+            Some(second.id)
+        );
+        answers.insert(
+            second.id,
+            answer_for(&second, json!(false)).expect("valid synthetic answer"),
+        );
+        assert_eq!(
+            next_unanswered_item_id(&attempt, &answers, second.id),
+            Some(third.id)
+        );
+        answers.insert(
+            third.id,
+            answer_for(&third, json!(true)).expect("valid synthetic answer"),
+        );
+        assert_eq!(next_unanswered_item_id(&attempt, &answers, third.id), None);
     }
 
     #[wasm_bindgen_test]

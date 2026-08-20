@@ -149,6 +149,107 @@ pub struct CompanyTemplateSummary {
     pub methodology: Option<MethodologySummary>,
     pub latest_draft: Option<TemplateVersionSummary>,
     pub latest_published: Option<TemplateVersionSummary>,
+    #[serde(default)]
+    pub can_manage: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DraftMetricMapping {
+    pub metric_code: String,
+    pub contribution_weight: serde_json::Value,
+    pub direction: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DraftOption {
+    pub code: String,
+    pub label: String,
+    pub sort_order: i32,
+    pub numeric_value: Option<serde_json::Value>,
+    pub is_disqualifying: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DraftItem {
+    pub code: String,
+    pub prompt: String,
+    pub guidance: Option<String>,
+    pub response_type: String,
+    pub is_required: bool,
+    pub sort_order: i32,
+    pub weight: Option<serde_json::Value>,
+    pub min_value: Option<serde_json::Value>,
+    pub max_value: Option<serde_json::Value>,
+    pub passing_value: Option<serde_json::Value>,
+    pub evidence_mode: String,
+    pub criticality: String,
+    pub config: serde_json::Value,
+    pub options: Vec<DraftOption>,
+    pub metric_mappings: Vec<DraftMetricMapping>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DraftSection {
+    pub code: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub section_kind: String,
+    pub sort_order: i32,
+    pub weight: Option<serde_json::Value>,
+    pub parent_code: Option<String>,
+    pub items: Vec<DraftItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct DraftTemplateInfo {
+    pub id: Uuid,
+    pub scope: String,
+    pub company_id: Option<Uuid>,
+    pub source_library_version_id: Option<Uuid>,
+    pub name: String,
+    pub code: String,
+    pub activity_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct DraftVersionInfo {
+    pub id: Uuid,
+    pub version: i32,
+    pub status: String,
+    pub edit_revision: i32,
+    pub local_description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CompanyDraftDocument {
+    pub template: DraftTemplateInfo,
+    pub version: DraftVersionInfo,
+    pub methodology: MethodologyDetail,
+    pub sections: Vec<DraftSection>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SaveCompanyDraftRequest {
+    pub expected_edit_revision: i32,
+    pub template_name: Option<String>,
+    pub local_description: Option<String>,
+    pub change_note: Option<String>,
+    pub sections: Vec<DraftSection>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NextDraftRequest {
+    pub change_note: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct NextDraftCreated {
+    pub template_id: Uuid,
+    pub draft_version_id: Uuid,
+    pub version: i32,
+    pub section_count: i64,
+    pub item_count: i64,
+    pub option_count: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -267,6 +368,90 @@ impl AssessmentApiClient {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub async fn get_company_draft(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        template_id: Uuid,
+        version_id: Uuid,
+    ) -> Result<CompanyDraftDocument, AssessmentApiError> {
+        self.get(
+            &format!(
+                "/api/v1/companies/{company_id}/assessment-templates/\
+                 {template_id}/versions/{version_id}/draft"
+            )
+            .replace(' ', ""),
+            token,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn create_next_draft(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        template_id: Uuid,
+        published_version_id: Uuid,
+        request: &NextDraftRequest,
+    ) -> Result<NextDraftCreated, AssessmentApiError> {
+        self.send_json(
+            "POST",
+            &format!(
+                "/api/v1/companies/{company_id}/assessment-templates/\
+                 {template_id}/versions/{published_version_id}/next-draft"
+            )
+            .replace(' ', ""),
+            token,
+            request,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn save_company_draft(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        template_id: Uuid,
+        version_id: Uuid,
+        request: &SaveCompanyDraftRequest,
+    ) -> Result<TemplateDocument, AssessmentApiError> {
+        self.send_json(
+            "PUT",
+            &format!(
+                "/api/v1/companies/{company_id}/assessment-templates/\
+                 {template_id}/versions/{version_id}/draft"
+            )
+            .replace(' ', ""),
+            token,
+            request,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn publish_company_draft(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        template_id: Uuid,
+        version_id: Uuid,
+    ) -> Result<serde_json::Value, AssessmentApiError> {
+        self.send_json(
+            "POST",
+            &format!(
+                "/api/v1/companies/{company_id}/assessment-templates/\
+                 {template_id}/versions/{version_id}/publish"
+            )
+            .replace(' ', ""),
+            token,
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
     async fn get<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -277,6 +462,32 @@ impl AssessmentApiClient {
                 "Authorization",
                 &format!("Bearer {}", token.authorization_value()),
             )
+            .send()
+            .await
+            .map_err(|_| AssessmentApiError::NetworkUnavailable)?;
+        parse_json(response).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn send_json<T: DeserializeOwned, B: Serialize>(
+        &self,
+        method: &str,
+        path: &str,
+        token: &AccountAccessToken,
+        body: &B,
+    ) -> Result<T, AssessmentApiError> {
+        let request = match method {
+            "POST" => Request::post(&format!("{}{}", self.base_url, path)),
+            "PUT" => Request::put(&format!("{}{}", self.base_url, path)),
+            _ => return Err(AssessmentApiError::InvalidRequest),
+        };
+        let response = request
+            .header(
+                "Authorization",
+                &format!("Bearer {}", token.authorization_value()),
+            )
+            .json(body)
+            .map_err(|_| AssessmentApiError::InvalidRequest)?
             .send()
             .await
             .map_err(|_| AssessmentApiError::NetworkUnavailable)?;

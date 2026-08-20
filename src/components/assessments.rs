@@ -11,8 +11,9 @@ use crate::{
     account_api::{AccountApiError, SelectedCompanyId},
     account_session::{AccountSessionAdapter, AccountSessionState, AuthenticatedAccountSession},
     assessment_api::{
-        AdoptLibraryTemplateRequest, AssessmentApiClient, AssessmentApiError,
-        CompanyTemplateSummary, LibraryQuery, LibraryTemplateSummary, TemplateDocument,
+        AdoptLibraryTemplateRequest, AssessmentApiClient, AssessmentApiError, CompanyDraftDocument,
+        CompanyTemplateSummary, DraftItem, DraftMetricMapping, DraftSection, LibraryQuery,
+        LibraryTemplateSummary, NextDraftRequest, SaveCompanyDraftRequest, TemplateDocument,
         TemplateVersionSummary,
     },
 };
@@ -43,6 +44,7 @@ enum AssessmentView {
     List,
     LibraryDetail(TemplateDocument),
     CompanyDetail(CompanyTemplateSummary),
+    CompanyEditor(CompanyDraftDocument),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -652,7 +654,65 @@ pub fn AssessmentsPage(
                                 },
                                 AssessmentView::CompanyDetail(template) => rsx! {
                                     CompanyDetail {
-                                        template,
+                                        template: template.clone(),
+                                        on_back: move |_| view.set(AssessmentView::List),
+                                        on_edit: {
+                                            let adapter = session_adapter.clone();
+                                            let client = api.clone();
+                                            move |_| {
+                                                let adapter = adapter.clone();
+                                                let client = client.clone();
+                                                let template = template.clone();
+                                                spawn(async move {
+                                                    error.set(None);
+                                                    let AccountSessionState::Authenticated(account) = adapter.state() else {
+                                                        error.set(Some(AssessmentApiError::AuthenticationRequired));
+                                                        return;
+                                                    };
+                                                    let Some(company_id) = account.selected_company.map(|value| value.0) else {
+                                                        error.set(Some(AssessmentApiError::PermissionDenied));
+                                                        return;
+                                                    };
+                                                    let version_id = if let Some(draft) = template.latest_draft.as_ref() {
+                                                        draft.version_id
+                                                    } else {
+                                                        let Some(published) = template.latest_published.as_ref() else {
+                                                            error.set(Some(AssessmentApiError::InvalidRequest));
+                                                            return;
+                                                        };
+                                                        match client.create_next_draft(
+                                                            &account.access_token,
+                                                            company_id,
+                                                            template.template_id,
+                                                            published.version_id,
+                                                            &NextDraftRequest {
+                                                                change_note: Some("Редактирование шаблона компании".into()),
+                                                            },
+                                                        ).await {
+                                                            Ok(created) => created.draft_version_id,
+                                                            Err(problem) => {
+                                                                error.set(Some(problem));
+                                                                return;
+                                                            }
+                                                        }
+                                                    };
+                                                    match client.get_company_draft(
+                                                        &account.access_token,
+                                                        company_id,
+                                                        template.template_id,
+                                                        version_id,
+                                                    ).await {
+                                                        Ok(document) => view.set(AssessmentView::CompanyEditor(document)),
+                                                        Err(problem) => error.set(Some(problem)),
+                                                    }
+                                                });
+                                            }
+                                        },
+                                    }
+                                },
+                                AssessmentView::CompanyEditor(document) => rsx! {
+                                    CompanyDraftEditor {
+                                        initial: document,
                                         on_back: move |_| view.set(AssessmentView::List),
                                     }
                                 },
@@ -1290,7 +1350,11 @@ fn template_version_launch_available(status: &str) -> bool {
 }
 
 #[component]
-fn CompanyDetail(template: CompanyTemplateSummary, on_back: EventHandler<()>) -> Element {
+fn CompanyDetail(
+    template: CompanyTemplateSummary,
+    on_back: EventHandler<()>,
+    on_edit: EventHandler<()>,
+) -> Element {
     let version = preferred_version(&template);
     rsx! {
         section { class: "assessment-content assessment-detail",
@@ -1338,8 +1402,607 @@ fn CompanyDetail(template: CompanyTemplateSummary, on_back: EventHandler<()>) ->
                 }
             }
             div { class: "assessment-readonly-note",
-                strong { "Режим просмотра" }
-                p { "Редактор структуры появится на следующем этапе." }
+                strong { "Опубликованная версия защищена" }
+                p { "Изменения создаются только в новой черновой версии. Действующие замеры сохраняют прежнюю версию." }
+                if template.can_manage {
+                    button {
+                        class: "btn btn-primary",
+                        r#type: "button",
+                        onclick: move |_| on_edit.call(()),
+                        if template.latest_draft.is_some() {
+                            "Продолжить редактирование"
+                        } else {
+                            "Создать новую версию"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+const CANONICAL_METRICS: [(&str, &str); 7] = [
+    ("people", "Люди"),
+    ("service", "Сервис"),
+    ("taste", "Вкус"),
+    ("speed", "Скорость"),
+    ("order", "Порядок"),
+    ("space", "Пространство"),
+    ("economics", "Экономика"),
+];
+
+fn numeric_text(value: &Option<serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(value)) => value.clone(),
+        Some(value) => value.to_string(),
+        None => String::new(),
+    }
+}
+
+fn numeric_value(value: String) -> Option<serde_json::Value> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::String(value.to_string()))
+    }
+}
+
+fn numeric_values_equal(
+    left: &Option<serde_json::Value>,
+    right: &Option<serde_json::Value>,
+) -> bool {
+    let parse = |value: &Option<serde_json::Value>| {
+        value
+            .as_ref()
+            .and_then(|value| numeric_text(&Some(value.clone())).parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    };
+    matches!((parse(left), parse(right)), (Some(left), Some(right)) if left == right)
+}
+
+fn draft_document_valid(document: &CompanyDraftDocument) -> bool {
+    !document.template.name.trim().is_empty()
+        && !document.sections.is_empty()
+        && document.sections.iter().all(|section| {
+            !section.title.trim().is_empty()
+                && !section.items.is_empty()
+                && section.items.iter().all(|item| {
+                    !item.prompt.trim().is_empty()
+                        && item
+                            .weight
+                            .as_ref()
+                            .and_then(|value| {
+                                numeric_text(&Some(value.clone())).parse::<f64>().ok()
+                            })
+                            .is_some_and(|weight| weight.is_finite() && weight > 0.0)
+                        && !item.metric_mappings.is_empty()
+                        && item.metric_mappings.iter().all(|mapping| {
+                            numeric_values_equal(
+                                &Some(mapping.contribution_weight.clone()),
+                                &item.weight,
+                            )
+                        })
+                })
+        })
+}
+
+fn draft_validation_message(document: &CompanyDraftDocument) -> Option<String> {
+    if document.template.name.trim().is_empty() {
+        return Some("Укажите название шаблона.".into());
+    }
+    if document.sections.is_empty() {
+        return Some("Добавьте хотя бы один раздел.".into());
+    }
+    for (section_index, section) in document.sections.iter().enumerate() {
+        if section.title.trim().is_empty() {
+            return Some(format!("Укажите название раздела {}.", section_index + 1));
+        }
+        if section.items.is_empty() {
+            return Some(format!(
+                "В разделе «{}» должен быть хотя бы один пункт.",
+                section.title
+            ));
+        }
+        for (item_index, item) in section.items.iter().enumerate() {
+            let label = format!("Раздел {}, пункт {}", section_index + 1, item_index + 1);
+            if item.prompt.trim().is_empty() {
+                return Some(format!("{label}: заполните формулировку."));
+            }
+            let valid_weight = item
+                .weight
+                .as_ref()
+                .and_then(|value| numeric_text(&Some(value.clone())).parse::<f64>().ok())
+                .is_some_and(|weight| weight.is_finite() && weight > 0.0);
+            if !valid_weight {
+                return Some(format!("{label}: укажите положительный вес."));
+            }
+            if item.metric_mappings.is_empty() {
+                return Some(format!("{label}: выберите показатель аналитики."));
+            }
+        }
+    }
+    None
+}
+
+fn normalize_draft_order(document: &mut CompanyDraftDocument) {
+    for (section_order, section) in document.sections.iter_mut().enumerate() {
+        section.sort_order = section_order as i32;
+        for (item_order, item) in section.items.iter_mut().enumerate() {
+            item.sort_order = item_order as i32;
+            for (option_order, option) in item.options.iter_mut().enumerate() {
+                option.sort_order = option_order as i32;
+            }
+        }
+    }
+}
+
+fn synchronize_mapping_weights(item: &mut DraftItem, weight: Option<serde_json::Value>) {
+    item.weight = weight.clone();
+    for mapping in &mut item.metric_mappings {
+        mapping.contribution_weight = weight
+            .clone()
+            .unwrap_or_else(|| serde_json::Value::String("1".into()));
+    }
+}
+
+fn move_draft_item(
+    document: &mut CompanyDraftDocument,
+    from_section: usize,
+    item_index: usize,
+    to_section: usize,
+) -> bool {
+    if from_section >= document.sections.len()
+        || to_section >= document.sections.len()
+        || from_section == to_section
+        || item_index >= document.sections[from_section].items.len()
+    {
+        return false;
+    }
+    let item = document.sections[from_section].items.remove(item_index);
+    document.sections[to_section].items.push(item);
+    normalize_draft_order(document);
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftDeleteTarget {
+    Section(usize),
+    Item(usize, usize),
+}
+
+#[component]
+fn CompanyDraftEditor(initial: CompanyDraftDocument, on_back: EventHandler<()>) -> Element {
+    let api = use_context::<AssessmentApiClient>();
+    let session = use_context::<AccountSessionAdapter>();
+    let mut document = use_signal(|| initial.clone());
+    let mut saved_document = use_signal(|| initial.clone());
+    let mut saving = use_signal(|| false);
+    let mut confirming_publish = use_signal(|| false);
+    let mut previewing = use_signal(|| false);
+    let mut delete_target = use_signal(|| None::<DraftDeleteTarget>);
+    let mut message = use_signal(|| None::<String>);
+    let mut conflict = use_signal(|| false);
+    let validation_message = draft_validation_message(&document());
+    let valid = draft_document_valid(&document());
+    let validation_text = validation_message
+        .clone()
+        .unwrap_or_else(|| String::from("проверьте содержимое черновика"));
+    let dirty = document() != saved_document();
+
+    let save_action = {
+        let api = api.clone();
+        let session = session.clone();
+        EventHandler::new(move |publish_after: bool| {
+            if saving() {
+                return;
+            }
+            if publish_after {
+                if let Some(problem) = draft_validation_message(&document()) {
+                    message.set(Some(problem));
+                    return;
+                }
+            }
+            let client = api.clone();
+            let adapter = session.clone();
+            let mut snapshot = document();
+            normalize_draft_order(&mut snapshot);
+            spawn(async move {
+                saving.set(true);
+                conflict.set(false);
+                message.set(None);
+                let AccountSessionState::Authenticated(account) = adapter.state() else {
+                    saving.set(false);
+                    message.set(Some("Сессия завершена. Войдите снова.".into()));
+                    return;
+                };
+                let Some(company_id) = account.selected_company.map(|value| value.0) else {
+                    saving.set(false);
+                    message.set(Some("Выберите организацию.".into()));
+                    return;
+                };
+                let request = SaveCompanyDraftRequest {
+                    expected_edit_revision: snapshot.version.edit_revision,
+                    template_name: Some(snapshot.template.name.clone()),
+                    local_description: snapshot.version.local_description.clone(),
+                    change_note: Some("Изменение структуры шаблона компании".into()),
+                    sections: snapshot.sections.clone(),
+                };
+                match client
+                    .save_company_draft(
+                        &account.access_token,
+                        company_id,
+                        snapshot.template.id,
+                        snapshot.version.id,
+                        &request,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        if publish_after {
+                            match client
+                                .publish_company_draft(
+                                    &account.access_token,
+                                    company_id,
+                                    snapshot.template.id,
+                                    snapshot.version.id,
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    confirming_publish.set(false);
+                                    message.set(Some(
+                                        "Новая версия опубликована. Текущие замеры не изменены."
+                                            .into(),
+                                    ));
+                                }
+                                Err(problem) => message.set(Some(safe_error(problem).into())),
+                            }
+                        } else {
+                            match client
+                                .get_company_draft(
+                                    &account.access_token,
+                                    company_id,
+                                    snapshot.template.id,
+                                    snapshot.version.id,
+                                )
+                                .await
+                            {
+                                Ok(reloaded) => {
+                                    saved_document.set(reloaded.clone());
+                                    document.set(reloaded);
+                                    message.set(Some("Черновик сохранён.".into()));
+                                }
+                                Err(problem) => message.set(Some(safe_error(problem).into())),
+                            }
+                        }
+                    }
+                    Err(AssessmentApiError::Conflict) => {
+                        conflict.set(true);
+                        message.set(Some(
+                            "Черновик изменился в другой сессии. Перезагрузите актуальную версию."
+                                .into(),
+                        ));
+                    }
+                    Err(problem) => message.set(Some(safe_error(problem).into())),
+                }
+                saving.set(false);
+            });
+        })
+    };
+
+    rsx! {
+        section { class: "assessment-content assessment-template-editor",
+            header { class: "assessment-editor-header",
+                button { class: "assessment-back", r#type: "button", onclick: move |_| on_back.call(()), "← Мои шаблоны" }
+                div {
+                    p { class: "assessment-eyebrow", "ЧЕРНОВИК ВЕРСИИ {document().version.version}" }
+                    h2 { "Редактор шаблона" }
+                    p { "Методология и опубликованные версии остаются неизменными." }
+                }
+                div { class: "assessment-editor-actions",
+                    span { class: "assessment-editor-state",
+                        if conflict() { "Конфликт версии" } else if saving() { "Сохранение…" } else if dirty { "Есть несохранённые изменения" } else { "Сохранено" }
+                    }
+                    button { class: "btn btn-secondary", r#type: "button", disabled: saving() || !dirty, onclick: move |_| save_action.call(false), "Сохранить черновик" }
+                    button { class: "btn btn-secondary", r#type: "button", disabled: saving(), onclick: move |_| previewing.set(!previewing()), "Предпросмотр" }
+                    button {
+                        class: "btn btn-secondary", r#type: "button", disabled: saving() || !dirty,
+                        onclick: move |_| {
+                            document.set(saved_document());
+                            conflict.set(false);
+                            message.set(Some("Несохранённые изменения отменены.".into()));
+                        },
+                        "Отменить изменения"
+                    }
+                    button { class: "btn btn-primary", r#type: "button", disabled: saving() || !valid, onclick: move |_| confirming_publish.set(true), "Опубликовать новую версию" }
+                }
+            }
+            if !valid {
+                div { class: "assessment-inline-warning", role: "status",
+                    "Нельзя опубликовать: {validation_text}"
+                }
+            }
+            if let Some(text) = message() {
+                div { class: if conflict() { "assessment-inline-error" } else { "assessment-inline-success" }, role: "status", "{text}" }
+            }
+            if conflict() {
+                button {
+                    class: "btn btn-secondary",
+                    r#type: "button",
+                    onclick: {
+                        let client = api.clone();
+                        let adapter = session.clone();
+                        move |_| {
+                            let client = client.clone();
+                            let adapter = adapter.clone();
+                            let current = document();
+                            spawn(async move {
+                                let AccountSessionState::Authenticated(account) = adapter.state() else { return; };
+                                let Some(company_id) = account.selected_company.map(|value| value.0) else { return; };
+                                if let Ok(reloaded) = client.get_company_draft(&account.access_token, company_id, current.template.id, current.version.id).await {
+                                    saved_document.set(reloaded.clone());
+                                    document.set(reloaded);
+                                    conflict.set(false);
+                                    message.set(Some("Загружена актуальная редакция.".into()));
+                                }
+                            });
+                        }
+                    },
+                    "Перезагрузить актуальный черновик"
+                }
+            }
+            label { class: "assessment-editor-field",
+                span { "Название шаблона" }
+                input {
+                    value: "{document().template.name}",
+                    oninput: move |event| document.write().template.name = event.value(),
+                }
+            }
+            if previewing() {
+                section { class: "assessment-editor-preview", aria_label: "Предпросмотр шаблона",
+                    p { class: "assessment-eyebrow", "ПРЕДПРОСМОТР" }
+                    h3 { "{document().template.name}" }
+                    for section in document().sections {
+                        div { class: "assessment-editor-preview-section", key: "preview-{section.code}",
+                            strong { "{section.title}" }
+                            for item in section.items {
+                                p { key: "preview-{section.code}-{item.code}", "{item.prompt}" }
+                            }
+                        }
+                    }
+                }
+            }
+            for section_index in 0..document().sections.len() {
+                article { class: "assessment-editor-section", key: "section-{section_index}",
+                    div { class: "assessment-editor-row",
+                        input {
+                            aria_label: "Название раздела",
+                            value: "{document().sections[section_index].title}",
+                            oninput: move |event| document.write().sections[section_index].title = event.value(),
+                        }
+                        button { r#type: "button", aria_label: "Переместить раздел выше", disabled: section_index == 0, onclick: move |_| document.write().sections.swap(section_index, section_index - 1), "↑" }
+                        button { r#type: "button", aria_label: "Переместить раздел ниже", disabled: section_index + 1 == document().sections.len(), onclick: move |_| document.write().sections.swap(section_index, section_index + 1), "↓" }
+                        button { r#type: "button", class: "assessment-critical-action", onclick: move |_| delete_target.set(Some(DraftDeleteTarget::Section(section_index))), "Удалить раздел" }
+                    }
+                    for item_index in 0..document().sections[section_index].items.len() {
+                        div { class: "assessment-editor-item", key: "item-{section_index}-{item_index}",
+                            textarea {
+                                aria_label: "Текст пункта",
+                                value: "{document().sections[section_index].items[item_index].prompt}",
+                                oninput: move |event| document.write().sections[section_index].items[item_index].prompt = event.value(),
+                            }
+                            textarea {
+                                aria_label: "Подсказка к пункту",
+                                placeholder: "Подсказка для проверяющего",
+                                value: "{document().sections[section_index].items[item_index].guidance.clone().unwrap_or_default()}",
+                                oninput: move |event| {
+                                    let value = event.value();
+                                    document.write().sections[section_index].items[item_index].guidance =
+                                        (!value.trim().is_empty()).then_some(value);
+                                },
+                            }
+                            div { class: "assessment-editor-grid",
+                                label { "Тип ответа"
+                                    select {
+                                        value: "{document().sections[section_index].items[item_index].response_type}",
+                                        onchange: move |event| {
+                                            let response_type = event.value();
+                                            let mut state = document.write();
+                                            let item = &mut state.sections[section_index].items[item_index];
+                                            item.response_type = response_type.clone();
+                                            if !matches!(response_type.as_str(), "single_choice" | "multi_choice") {
+                                                item.options.clear();
+                                            } else if item.options.is_empty() {
+                                                item.options.push(crate::assessment_api::DraftOption {
+                                                    code: "option-1".into(), label: "Вариант 1".into(),
+                                                    sort_order: 0, numeric_value: None, is_disqualifying: false,
+                                                });
+                                            }
+                                        },
+                                        option { value: "boolean", "Да / нет" }
+                                        option { value: "score", "Оценка" }
+                                        option { value: "integer", "Целое число" }
+                                        option { value: "decimal", "Число" }
+                                        option { value: "text", "Текст" }
+                                        option { value: "single_choice", "Один вариант" }
+                                        option { value: "multi_choice", "Несколько вариантов" }
+                                        option { value: "date", "Дата" }
+                                        option { value: "time", "Время" }
+                                    }
+                                }
+                                label { "Вес"
+                                    input {
+                                        r#type: "number", min: "0.000001", step: "0.1",
+                                        value: "{numeric_text(&document().sections[section_index].items[item_index].weight)}",
+                                        oninput: move |event| {
+                                            let weight = numeric_value(event.value());
+                                            let mut state = document.write();
+                                            let item = &mut state.sections[section_index].items[item_index];
+                                            synchronize_mapping_weights(item, weight);
+                                        }
+                                    }
+                                }
+                                label { "Показатель"
+                                    select {
+                                        value: "{document().sections[section_index].items[item_index].metric_mappings.first().map(|mapping| mapping.metric_code.as_str()).unwrap_or(\"\")}",
+                                        onchange: move |event| {
+                                            let mut state = document.write();
+                                            let item = &mut state.sections[section_index].items[item_index];
+                                            item.metric_mappings = vec![DraftMetricMapping {
+                                                metric_code: event.value(),
+                                                contribution_weight: item.weight.clone().unwrap_or_else(|| serde_json::Value::String("1".into())),
+                                                direction: "positive".into(),
+                                            }];
+                                        },
+                                        option { value: "", disabled: true, "Выберите" }
+                                        for (code, label) in CANONICAL_METRICS {
+                                            option { value: "{code}", "{label}" }
+                                        }
+                                    }
+                                }
+                                label { class: "assessment-editor-check",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: document().sections[section_index].items[item_index].is_required,
+                                        onchange: move |event| document.write().sections[section_index].items[item_index].is_required = event.checked(),
+                                    }
+                                    "Обязательный пункт"
+                                }
+                                label { "Подтверждение"
+                                    select {
+                                        value: "{document().sections[section_index].items[item_index].evidence_mode}",
+                                        onchange: move |event| document.write().sections[section_index].items[item_index].evidence_mode = event.value(),
+                                        option { value: "none", "Не требуется" }
+                                        option { value: "optional_comment", "Комментарий по желанию" }
+                                        option { value: "required_comment", "Комментарий обязателен" }
+                                        option { value: "optional_photo", "Фото по желанию" }
+                                        option { value: "required_photo", "Фото обязательно" }
+                                        option { value: "photo_and_comment", "Фото и комментарий" }
+                                    }
+                                }
+                                label { "Критичность"
+                                    select {
+                                        value: "{document().sections[section_index].items[item_index].criticality}",
+                                        onchange: move |event| document.write().sections[section_index].items[item_index].criticality = event.value(),
+                                        option { value: "normal", "Обычный" }
+                                        option { value: "critical", "Критический" }
+                                        option { value: "stop_factor", "Стоп-фактор" }
+                                    }
+                                }
+                            }
+                            if matches!(document().sections[section_index].items[item_index].response_type.as_str(), "single_choice" | "multi_choice") {
+                                div { class: "assessment-editor-options",
+                                    strong { "Варианты ответа" }
+                                    for option_index in 0..document().sections[section_index].items[item_index].options.len() {
+                                        div { class: "assessment-editor-row", key: "option-{section_index}-{item_index}-{option_index}",
+                                            input {
+                                                aria_label: "Текст варианта ответа",
+                                                value: "{document().sections[section_index].items[item_index].options[option_index].label}",
+                                                oninput: move |event| document.write().sections[section_index].items[item_index].options[option_index].label = event.value(),
+                                            }
+                                            button {
+                                                r#type: "button", class: "assessment-critical-action",
+                                                onclick: move |_| { document.write().sections[section_index].items[item_index].options.remove(option_index); },
+                                                "Удалить вариант"
+                                            }
+                                        }
+                                    }
+                                    button {
+                                        r#type: "button", class: "btn btn-secondary",
+                                        onclick: move |_| {
+                                            let next = document().sections[section_index].items[item_index].options.len() + 1;
+                                            document.write().sections[section_index].items[item_index].options.push(crate::assessment_api::DraftOption {
+                                                code: format!("option-{next}"), label: format!("Вариант {next}"),
+                                                sort_order: 0, numeric_value: None, is_disqualifying: false,
+                                            });
+                                        },
+                                        "+ Вариант"
+                                    }
+                                }
+                            }
+                            div { class: "assessment-editor-row compact",
+                                button { r#type: "button", disabled: item_index == 0, onclick: move |_| document.write().sections[section_index].items.swap(item_index, item_index - 1), "Выше" }
+                                button { r#type: "button", disabled: item_index + 1 == document().sections[section_index].items.len(), onclick: move |_| document.write().sections[section_index].items.swap(item_index, item_index + 1), "Ниже" }
+                                button { r#type: "button", disabled: section_index == 0, onclick: move |_| { move_draft_item(&mut document.write(), section_index, item_index, section_index - 1); }, "В предыдущий раздел" }
+                                button { r#type: "button", disabled: section_index + 1 == document().sections.len(), onclick: move |_| { move_draft_item(&mut document.write(), section_index, item_index, section_index + 1); }, "В следующий раздел" }
+                                button { r#type: "button", class: "assessment-critical-action", onclick: move |_| delete_target.set(Some(DraftDeleteTarget::Item(section_index, item_index))), "Удалить пункт" }
+                            }
+                        }
+                    }
+                    button {
+                        class: "btn btn-secondary", r#type: "button",
+                        onclick: move |_| {
+                            let code = format!("item-{}-{}", section_index + 1, document().sections[section_index].items.len() + 1);
+                            document.write().sections[section_index].items.push(DraftItem {
+                                code, prompt: "Новый пункт".into(), guidance: None,
+                                response_type: "boolean".into(), is_required: true,
+                                sort_order: 0, weight: Some(serde_json::Value::String("1".into())),
+                                min_value: None, max_value: None, passing_value: None,
+                                evidence_mode: "optional_comment".into(), criticality: "normal".into(),
+                                config: serde_json::json!({}), options: vec![], metric_mappings: vec![],
+                            });
+                        },
+                        "+ Добавить пункт"
+                    }
+                }
+            }
+            button {
+                class: "btn btn-secondary", r#type: "button",
+                onclick: move |_| {
+                    let index = document().sections.len() + 1;
+                    document.write().sections.push(DraftSection {
+                        code: format!("section-{index}"), title: "Новый раздел".into(),
+                        description: None, section_kind: "section".into(), sort_order: 0,
+                        weight: None, parent_code: None, items: vec![],
+                    });
+                },
+                "+ Добавить раздел"
+            }
+            if confirming_publish() {
+                div { class: "assessment-dialog-backdrop", role: "presentation",
+                    div { class: "assessment-dialog", role: "dialog", aria_modal: "true", aria_labelledby: "publish-draft-title",
+                        h3 { id: "publish-draft-title", "Опубликовать новую версию?" }
+                        p { "Новые назначения будут использовать её. Текущие и завершённые замеры сохранят прежнюю версию." }
+                        div { class: "assessment-dialog-actions",
+                            button { class: "btn btn-secondary", r#type: "button", onclick: move |_| confirming_publish.set(false), "Отмена" }
+                            button { class: "btn btn-primary", r#type: "button", onclick: move |_| save_action.call(true), "Сохранить и опубликовать" }
+                        }
+                    }
+                }
+            }
+            if let Some(target) = delete_target() {
+                div { class: "assessment-dialog-backdrop", role: "presentation",
+                    div { class: "assessment-dialog", role: "dialog", aria_modal: "true", aria_labelledby: "delete-draft-content-title",
+                        h3 { id: "delete-draft-content-title", "Подтвердите удаление" }
+                        p {
+                            match target {
+                                DraftDeleteTarget::Section(index) => format!(
+                                    "Раздел и {} пунктов будут удалены только из текущего черновика.",
+                                    document().sections.get(index).map(|section| section.items.len()).unwrap_or(0)
+                                ),
+                                DraftDeleteTarget::Item(_, _) => "Пункт будет удалён только из текущего черновика.".into(),
+                            }
+                        }
+                        div { class: "assessment-dialog-actions",
+                            button { class: "btn btn-secondary", r#type: "button", onclick: move |_| delete_target.set(None), "Отмена" }
+                            button {
+                                class: "assessment-critical-action", r#type: "button",
+                                onclick: move |_| {
+                                    let mut state = document.write();
+                                    match target {
+                                        DraftDeleteTarget::Section(index) if index < state.sections.len() => { state.sections.remove(index); }
+                                        DraftDeleteTarget::Item(section, item) if section < state.sections.len() && item < state.sections[section].items.len() => { state.sections[section].items.remove(item); }
+                                        _ => {}
+                                    }
+                                    normalize_draft_order(&mut state);
+                                    delete_target.set(None);
+                                },
+                                "Удалить"
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1542,6 +2205,19 @@ fn AssessmentError(problem: AssessmentApiError, on_retry: EventHandler<()>) -> E
             p { "{body}" }
             button { class: "assessment-button secondary", r#type: "button", onclick: move |_| on_retry.call(()), "Повторить" }
         }
+    }
+}
+
+fn safe_error(problem: AssessmentApiError) -> &'static str {
+    match problem {
+        AssessmentApiError::AuthenticationRequired => "Сессия завершена. Войдите снова.",
+        AssessmentApiError::PermissionDenied => "Недостаточно прав для изменения шаблона.",
+        AssessmentApiError::NotFound => "Черновик больше недоступен.",
+        AssessmentApiError::Conflict => "Черновик изменён в другой сессии.",
+        AssessmentApiError::InvalidRequest => "Проверьте структуру, веса и показатели.",
+        AssessmentApiError::NetworkUnavailable => "Нет соединения. Изменения не отправлены.",
+        AssessmentApiError::ConfigurationUnavailable => "Сервис временно недоступен.",
+        AssessmentApiError::InternalError => "Не удалось выполнить действие.",
     }
 }
 
@@ -1835,6 +2511,67 @@ mod tests {
             methodology: None,
             latest_draft: None,
             latest_published: None,
+            can_manage: true,
+        }
+    }
+
+    fn company_draft_document() -> CompanyDraftDocument {
+        CompanyDraftDocument {
+            template: crate::assessment_api::DraftTemplateInfo {
+                id: Uuid::from_u128(10),
+                scope: "company".into(),
+                company_id: Some(Uuid::from_u128(11)),
+                source_library_version_id: Some(Uuid::from_u128(12)),
+                name: "Template".into(),
+                code: "template".into(),
+                activity_type: "evaluation".into(),
+            },
+            version: crate::assessment_api::DraftVersionInfo {
+                id: Uuid::from_u128(13),
+                version: 2,
+                status: "draft".into(),
+                edit_revision: 1,
+                local_description: None,
+            },
+            methodology: crate::assessment_api::MethodologyDetail {
+                id: Uuid::from_u128(14),
+                code: Some("synthetic".into()),
+                title: "Synthetic".into(),
+                body: None,
+                version: 1,
+                owner_type: Some("restos".into()),
+                status: Some("active".into()),
+            },
+            sections: vec![DraftSection {
+                code: "first".into(),
+                title: "First".into(),
+                description: None,
+                section_kind: "section".into(),
+                sort_order: 0,
+                weight: None,
+                parent_code: None,
+                items: vec![DraftItem {
+                    code: "criterion".into(),
+                    prompt: "Criterion".into(),
+                    guidance: None,
+                    response_type: "boolean".into(),
+                    is_required: true,
+                    sort_order: 0,
+                    weight: Some(serde_json::Value::String("1".into())),
+                    min_value: None,
+                    max_value: None,
+                    passing_value: None,
+                    evidence_mode: "none".into(),
+                    criticality: "normal".into(),
+                    config: serde_json::json!({}),
+                    options: vec![],
+                    metric_mappings: vec![DraftMetricMapping {
+                        metric_code: "service".into(),
+                        contribution_weight: serde_json::Value::String("1".into()),
+                        direction: "positive".into(),
+                    }],
+                }],
+            }],
         }
     }
 
@@ -2034,6 +2771,93 @@ mod tests {
         );
         assert!(!ASSESSMENT_TOUR_PREFERENCE_KEY.contains("token"));
         assert!(!ASSESSMENT_TOUR_PREFERENCE_KEY.contains("permission"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn company_editor_synchronizes_mapping_weight_with_criterion() {
+        let mut item = DraftItem {
+            code: "service".into(),
+            prompt: "Service".into(),
+            guidance: None,
+            response_type: "boolean".into(),
+            is_required: true,
+            sort_order: 0,
+            weight: Some(serde_json::Value::String("1".into())),
+            min_value: None,
+            max_value: None,
+            passing_value: None,
+            evidence_mode: "optional_comment".into(),
+            criticality: "normal".into(),
+            config: serde_json::json!({}),
+            options: vec![],
+            metric_mappings: vec![DraftMetricMapping {
+                metric_code: "service".into(),
+                contribution_weight: serde_json::Value::String("1".into()),
+                direction: "positive".into(),
+            }],
+        };
+        synchronize_mapping_weights(&mut item, Some(serde_json::Value::String("2.5".into())));
+        assert_eq!(
+            item.weight,
+            Some(item.metric_mappings[0].contribution_weight.clone())
+        );
+        assert_eq!(item.metric_mappings[0].metric_code, "service");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn company_editor_visibility_is_fail_closed_by_manage_projection() {
+        let mut template = company_template(None, "Local");
+        assert!(template.can_manage);
+        template.can_manage = false;
+        assert!(!template.can_manage);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn company_editor_requires_mapping_and_reports_exact_item() {
+        let mut draft = company_draft_document();
+        draft.sections[0].items[0].metric_mappings.clear();
+        assert!(!draft_document_valid(&draft));
+        assert_eq!(
+            draft_validation_message(&draft).as_deref(),
+            Some("Раздел 1, пункт 1: выберите показатель аналитики.")
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn company_editor_accepts_equivalent_numeric_weight_representations() {
+        let mut draft = company_draft_document();
+        draft.sections[0].items[0].weight = Some(serde_json::Value::String("1.0".into()));
+        draft.sections[0].items[0].metric_mappings[0].contribution_weight =
+            serde_json::Value::from(1);
+
+        assert!(draft_document_valid(&draft));
+        assert_eq!(draft_validation_message(&draft), None);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn company_editor_moves_item_between_sections_without_copying_it() {
+        let mut draft = company_draft_document();
+        let original_code = draft.sections[0].items[0].code.clone();
+        draft.sections.push(DraftSection {
+            code: "second".into(),
+            title: "Second".into(),
+            description: None,
+            section_kind: "section".into(),
+            sort_order: 1,
+            weight: None,
+            parent_code: None,
+            items: vec![],
+        });
+        assert!(move_draft_item(&mut draft, 0, 0, 1));
+        assert!(draft.sections[0].items.is_empty());
+        assert_eq!(draft.sections[1].items.len(), 1);
+        assert_eq!(draft.sections[1].items[0].code, original_code);
+        assert_eq!(draft.sections[1].items[0].sort_order, 0);
     }
 
     #[cfg(target_arch = "wasm32")]
