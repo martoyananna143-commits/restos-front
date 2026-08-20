@@ -1217,7 +1217,6 @@ fn TemplateCategory(
                             let version = preferred_version(&template);
                             let status = version.map(|value| value.status.as_str()).unwrap_or("archived");
                             let item = template.clone();
-                            let is_waiter_draft = template.code == "waiter-kln" && status == "draft";
                             rsx! {
                                 article { class: "assessment-card",
                                     div { class: "assessment-card-top",
@@ -1247,17 +1246,12 @@ fn TemplateCategory(
                                                 }
                                             }
                                             span {
-                                                if version.status == "published" && !is_waiter_draft {
+                                                if template_version_launch_available(&version.status) {
                                                     "Расчёт и запуск доступны"
                                                 } else {
                                                     "Расчёт и запуск недоступны"
                                                 }
                                             }
-                                        }
-                                    }
-                                    if is_waiter_draft {
-                                        p { class: "assessment-blocked-reason",
-                                            "Шаблон ожидает проверки двух весов и пока недоступен для назначения."
                                         }
                                     }
                                     button {
@@ -1289,6 +1283,10 @@ fn is_imported_weighted(code: &str) -> bool {
             | "restaurant-service-walkthrough"
             | "production-walkthrough"
     )
+}
+
+fn template_version_launch_available(status: &str) -> bool {
+    status == "published"
 }
 
 #[component]
@@ -1878,6 +1876,14 @@ mod tests {
         assert!(is_imported_weighted("production-walkthrough"));
         assert!(is_imported_weighted("waiter-kln"));
         assert!(!is_imported_weighted("unreviewed-template"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn waiter_launch_state_uses_published_version_contract() {
+        assert!(template_version_launch_available("published"));
+        assert!(!template_version_launch_available("draft"));
+        assert!(!template_version_launch_available("archived"));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
