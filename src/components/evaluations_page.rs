@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use serde_json::Value as JsonValue;
 
 use crate::api;
+use crate::presentation_percent::format_percent_number;
 use crate::types::{EvaluationDetail, EvaluationItem};
 
 use super::shared::{ErrorView, LoadingView};
@@ -350,6 +351,7 @@ fn EvalCard(item: EvaluationItem, on_open: EventHandler<()>) -> Element {
             if let Some(score) = item.score_percentage {
                 {
                     let clr = score_color(score);
+                    let score_label = format_percent_number(score).unwrap_or_else(|| "—".into());
                     let stars = (score / 20.0).round() as usize;
                     rsx! {
                         div { class: "eval-score-row",
@@ -357,7 +359,7 @@ fn EvalCard(item: EvaluationItem, on_open: EventHandler<()>) -> Element {
                                 div { class: "prog-fill", style: "width:{score:.0}%; background:{clr};" }
                             }
                             span { style: "color:{clr}; font-weight:600; font-size:15px; width:52px; text-align:right;",
-                                "{score:.1}%"
+                                "{score_label}"
                             }
                         }
                         div { class: "eval-stars",
@@ -513,10 +515,11 @@ fn EvaluationDetailBody(
                 if let Some(score) = score_opt {
                     {
                         let clr = score_color(score);
+                        let score_label = format_percent_number(score).unwrap_or_else(|| "—".into());
                         rsx! {
                             div { class: "result-row",
                                 span { class: "result-label", "Итоговый балл" }
-                                span { class: "result-score", style: "color:{clr};", "{score:.1}%" }
+                                span { class: "result-score", style: "color:{clr};", "{score_label}" }
                             }
                         }
                     }

@@ -6,6 +6,7 @@ use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{
     account_session::{AccountSessionAdapter, AccountSessionState},
+    presentation_percent::format_percent,
     product_measurement_api::{
         ProductItem, ProductMeasurement, ProductMeasurementApiClient, ProductMeasurementApiError,
     },
@@ -181,22 +182,28 @@ pub fn ProductMeasurementPanel() -> Element {
                         spawn(async move { let result=api.complete(&token,company_id,&snapshot).await; busy.set(false); match result { Ok(value)=>measurement.set(Some(value)), Err(problem)=>message.set(Some(safe_error(&problem).into())) } });
                     }, "Завершить замер" }
                 } else if let Some(result)=current.result.as_ref() {
-                    div {
+                    { let taste_score = format_percent(&result.taste.score_percent).unwrap_or_else(|| "—".into());
+                    let speed_score = format_percent(&result.speed.score_percent).unwrap_or_else(|| "—".into());
+                    let overall_score = format_percent(&result.overall.score_percent).unwrap_or_else(|| "—".into());
+                    rsx! { div {
                         class:"product-result",
-                        strong { "Вкус: {result.taste.score_percent}%" }
-                        strong { "Скорость: {result.speed.score_percent}%" }
-                        strong { "Итог замера: {result.overall.score_percent}%" }
+                        strong { "Вкус: {taste_score}" }
+                        strong { "Скорость: {speed_score}" }
+                        strong { "Итог замера: {overall_score}" }
                         span { "Позиций: {result.item_count}" }
                         ul { class: "product-position-results",
                             for value in result.items.iter() {
-                                li {
+                                { let taste = format_percent(&value.taste.score_percent).unwrap_or_else(|| "—".into());
+                                let speed = format_percent(&value.speed.score_percent).unwrap_or_else(|| "—".into());
+                                let overall = format_percent(&value.overall.score_percent).unwrap_or_else(|| "—".into());
+                                rsx! { li {
                                     if let Some(item) = current.items.get(value.position_index) {
                                         strong { "{item.position_name}: " }
                                     } else {
                                         strong { "Позиция {value.position_index + 1}: " }
                                     }
-                                    "вкус {value.taste.score_percent}% · скорость {value.speed.score_percent}% · итог {value.overall.score_percent}%"
-                                }
+                                    "вкус {taste} · скорость {speed} · итог {overall}"
+                                } } }
                             }
                         }
                         button {
@@ -212,7 +219,7 @@ pub fn ProductMeasurementPanel() -> Element {
                             },
                             "Новый замер"
                         }
-                    }
+                    } } }
                 }
             }
         }

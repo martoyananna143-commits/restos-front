@@ -10,6 +10,7 @@ use crate::{
         OperationalWalkthroughApiClient, OperationalWalkthroughApiError,
         OperationalWalkthroughTemplate,
     },
+    presentation_percent::{format_percent, format_percentage_points},
     restaurant_metrics_api::{
         LowIndicatorRanking, MetricSourceDrilldown, RestaurantMetric, RestaurantMetricsApiClient,
         RestaurantMetricsApiError,
@@ -321,11 +322,14 @@ pub fn RestaurantMetricsDashboardPage(
                                 Some(Ok(Some(value))) if value.items.is_empty() => rsx! { p { class: "management-muted", "Недостаточно сопоставимых наблюдений." } },
                                 Some(Ok(Some(value))) => rsx! { ol { class: "metric-components",
                                     for item in value.items.iter() {
-                                        li { class: "metric-source-row", key: "low-{template_version_id}-{item.item_code}",
-                                            strong { "#{item.rank} · {item.label}" }
-                                            small { "{item.score_percent}% · наблюдений {item.sample_count} · покрытие {item.coverage}" }
-                                            if item.critical_failure_count > 0 { span { class: "management-error", "Критические отклонения: {item.critical_failure_count}" } }
-                                            if item.stop_factor_count > 0 { span { class: "management-error", "Стоп-факторы: {item.stop_factor_count}" } }
+                                        {
+                                            let score = format_percent(&item.score_percent).unwrap_or_else(|| "—".into());
+                                            rsx! { li { class: "metric-source-row", key: "low-{template_version_id}-{item.item_code}",
+                                                strong { "#{item.rank} · {item.label}" }
+                                                small { "{score} · наблюдений {item.sample_count} · покрытие {item.coverage}" }
+                                                if item.critical_failure_count > 0 { span { class: "management-error", "Критические отклонения: {item.critical_failure_count}" } }
+                                                if item.stop_factor_count > 0 { span { class: "management-error", "Стоп-факторы: {item.stop_factor_count}" } }
+                                            } }
                                         }
                                     }
                                 } },
@@ -342,13 +346,15 @@ pub fn RestaurantMetricsDashboardPage(
                                 Some(Ok(values)) => rsx! {
                                     div { class: "metric-components",
                                         for value in values.iter() {
-                                            article { class: "metric-source-row",
-                                                strong { "{source_label(&value.source_type)} · {value.score_percent}%" }
-                                                small { "{value.observed_at} · критериев {value.items.len()} · покрытие {value.coverage}" }
-                                                if !value.items.is_empty() {
-                                                    ul { class: "metric-criteria",
-                                                        for item in value.items.iter() {
-                                                            li {
+                                            {
+                                                let score = format_percent(&value.score_percent).unwrap_or_else(|| "—".into());
+                                                rsx! { article { class: "metric-source-row",
+                                                    strong { "{source_label(&value.source_type)} · {score}" }
+                                                    small { "{value.observed_at} · критериев {value.items.len()} · покрытие {value.coverage}" }
+                                                    if !value.items.is_empty() {
+                                                        ul { class: "metric-criteria",
+                                                            for item in value.items.iter() {
+                                                                li {
                                                                 if let Some(section) = item.section_code.as_deref() {
                                                                     span { "{section} / " }
                                                                 }
@@ -361,10 +367,11 @@ pub fn RestaurantMetricsDashboardPage(
                                                                 if item.critical_failure == Some(true) {
                                                                     span { class: "management-error", " · критическое отклонение" }
                                                                 }
+                                                                }
                                                             }
                                                         }
                                                     }
-                                                }
+                                                } }
                                             }
                                         }
                                     }
@@ -563,11 +570,12 @@ fn MetricCard(metric: RestaurantMetric, mut selected_metric: Signal<Option<Strin
                     for component in metric.components.iter() {
                         {
                             let width = score_width(&component.score_percent);
+                            let score_label = format_percent(&component.score_percent).unwrap_or_else(|| "—".into());
                             rsx! {
                                 div { class: "metric-component",
                                     div { class: "metric-component-line",
                                         strong { "{source_label(&component.source_type)}" }
-                                        span { "{component.score_percent}%" }
+                                        span { "{score_label}" }
                                     }
                                     div { class: "metric-track", aria_hidden: "true",
                                         div { class: "metric-fill", style: "width:{width:.2}%;" }
@@ -577,7 +585,10 @@ fn MetricCard(metric: RestaurantMetric, mut selected_metric: Signal<Option<Strin
                                     }
                                     if component.comparison_status == "comparable" {
                                         if let Some(delta) = component.delta.as_deref() {
-                                            small { "К предыдущему операционному дню: {delta} п.п." }
+                                            {
+                                                let delta_label = format_percentage_points(delta).unwrap_or_else(|| "—".into());
+                                                rsx! { small { "К предыдущему операционному дню: {delta_label}" } }
+                                            }
                                         }
                                     } else if component.comparison_status == "not_comparable" {
                                         small { "Сравнение недоступно: набор компонентов отличается." }

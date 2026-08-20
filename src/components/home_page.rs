@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use super::shared::{ErrorView, LoadingView};
 use crate::api;
 use crate::auth::AuthState;
+use crate::presentation_percent::format_percent_number;
 use crate::types::{EvaluationDetail, EvaluationItem, OrgInfo};
 
 fn score_tone(score: f64) -> &'static str {
@@ -254,7 +255,7 @@ fn ScoreRing(value: Option<f64>, is_personal: bool) -> Element {
     let offset = 339.292 - shown.unwrap_or(0.0) * 3.39292;
     let tone = shown.map(score_tone).unwrap_or("score-neutral");
     let label = shown
-        .map(|score| format!("{score:.1}%"))
+        .and_then(format_percent_number)
         .unwrap_or_else(|| "—".to_string());
     let subject = if is_personal {
         "Мой средний показатель"
@@ -262,7 +263,8 @@ fn ScoreRing(value: Option<f64>, is_personal: bool) -> Element {
         "Средний показатель по заведению"
     };
     let aria = shown
-        .map(|score| format!("{subject}: {score:.1} процента"))
+        .and_then(format_percent_number)
+        .map(|score| format!("{subject}: {score}"))
         .unwrap_or_else(|| format!("{subject} недоступен: завершённых замеров нет"));
 
     rsx! {
@@ -296,6 +298,7 @@ fn CompletedMeasurementRow(token: String, item: EvaluationItem) -> Element {
         async move { api::fetch_evaluation_detail(&tok, id).await }
     });
     let score = item.score_percentage.unwrap_or_default();
+    let score_label = format_percent_number(score).unwrap_or_else(|| "—".to_string());
     let tone = score_tone(score);
     let employee_name = item
         .evaluated_employee_name
@@ -330,7 +333,7 @@ fn CompletedMeasurementRow(token: String, item: EvaluationItem) -> Element {
                     h3 { "{employee_name}" }
                     time { datetime: "{created_at}", "{created_label}" }
                 }
-                span { class: "measurement-score {tone}", "{score:.1}%" }
+                span { class: "measurement-score {tone}", "{score_label}" }
             }
             {detail_content}
         }

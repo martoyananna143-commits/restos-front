@@ -2,6 +2,7 @@
 
 use super::shared::{ErrorView, LoadingView};
 use crate::api;
+use crate::presentation_percent::format_percent_number;
 use dioxus::prelude::*;
 
 fn initials(name: &str) -> String {
@@ -51,7 +52,9 @@ pub fn AnalyticsPage(token: String) -> Element {
         None => rsx! { LoadingView { message: "Загрузка аналитики...".to_string() } },
         Some(Err(e)) => rsx! { ErrorView { message: e } },
         Some(Ok(d)) => {
-            let avg_str = format!("{:.1}", d.average_score);
+            let avg_str = format_percent_number(d.average_score).unwrap_or_else(|| "—".into());
+            let monthly_avg =
+                format_percent_number(d.monthly_average_score).unwrap_or_else(|| "—".into());
             let tab = active_tab.read().clone();
             let top = d.top_employees.clone();
             let crit = d.criteria_stats.clone();
@@ -77,7 +80,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                             div { class: "stat-card",
                                 span { class: "label-text", if d.is_personal_view { "Ср. за месяц" } else { "Ср. балл" } }
                                 div { class: "stat-num", style: "color:var(--amber);",
-                                    if d.is_personal_view { "{d.monthly_average_score:.1}" } else { "{avg_str}" } span { "%" }
+                                    if d.is_personal_view { "{monthly_avg}" } else { "{avg_str}" }
                                 }
                             }
                             div { class: "stat-card",
@@ -115,7 +118,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                             {
                                                 let filler = row.filled_by_employee_name.clone().unwrap_or_else(|| "—".to_string());
                                                 let date = if row.created_at.len() >= 10 { row.created_at[..10].to_string() } else { row.created_at.clone() };
-                                                let score_text = row.score_percentage.map(|s| format!("{s:.1}%")).unwrap_or_else(|| "Черновик".to_string());
+                                                let score_text = row.score_percentage.and_then(format_percent_number).unwrap_or_else(|| "Черновик".to_string());
                                                 let clr = row.score_percentage.map(score_color).unwrap_or("var(--text3)");
                                                 rsx! {
                                                     div { class: "list-row", style: "padding:12px 16px;",
@@ -147,6 +150,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                                 let init   = initials(&emp.name);
                                                 let clr    = score_color(emp.avg);
                                                 let pct    = emp.avg;
+                                                let pct_label = format_percent_number(pct).unwrap_or_else(|| "—".into());
                                                 let name   = emp.name.clone();
                                                 let count  = emp.count;
                                                 rsx! {
@@ -161,7 +165,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                                             }
                                                         }
                                                         span { style: "font-size:15px; font-weight:600; color:{clr}; flex-shrink:0;",
-                                                            "{pct:.1}%"
+                                                            "{pct_label}"
                                                         }
                                                     }
                                                 }
@@ -182,6 +186,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                         for stat in crit.iter() {
                                             {
                                                 let pct = stat.pass_rate;
+                                                let pct_label = format_percent_number(pct).unwrap_or_else(|| "—".into());
                                                 let clr = score_color(pct);
                                                 let name = stat.criterion_name.clone();
                                                 rsx! {
@@ -193,7 +198,7 @@ pub fn AnalyticsPage(token: String) -> Element {
                                                             }
                                                         }
                                                         span { style: "font-size:14px; font-weight:600; color:{clr}; flex-shrink:0; margin-left:12px;",
-                                                            "{pct:.0}%"
+                                                            "{pct_label}"
                                                         }
                                                     }
                                                 }

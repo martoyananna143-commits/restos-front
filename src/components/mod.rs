@@ -49,7 +49,7 @@ pub use account_portal::{
 pub use account_today::AccountToday;
 pub use ai_assistant_page::AiAssistantPage;
 pub use analytics_page::AnalyticsPage;
-pub use assessment_attempts::{AssessmentAttemptsPage, AssessmentListView};
+pub use assessment_attempts::{AssessmentAttemptsPage, AssessmentListView, AssessmentResultPage};
 pub use assessment_management::{
     bootstrap_owner_capability, capability_from_probe, ManagerCapability,
 };

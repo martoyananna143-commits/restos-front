@@ -9,15 +9,18 @@ use uuid::Uuid;
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{
+    account_api::{AccountAccessToken, AccountApiError},
     account_session::{AccountSessionAdapter, AccountSessionState},
     assessment_attempt_api::{
-        AssessmentAttemptApiClient, AssessmentAttemptApiError, AssessmentItem, AssessmentSection,
+        AssessmentAttemptApiClient, AssessmentAttemptApiError, AssessmentHistoryItem,
+        AssessmentHistoryPage, AssessmentItem, AssessmentResultDetail, AssessmentSection,
         AssignmentHistoryPeriod, AssignmentSummary, AttemptAnswer, AttemptDocument,
         CompletionResult, ReplaceDraftRequest, RevisionConflict,
     },
     organization_workflow_api::{
         CreateTaskRequest, OrganizationWorkflowApiClient, OrganizationWorkflowApiError,
     },
+    presentation_percent::format_percent,
 };
 
 use super::team_management::DraftTaskActions;
@@ -541,6 +544,222 @@ fn safe_error(error: &AssessmentAttemptApiError) -> &'static str {
     }
 }
 
+fn grouped_history(items: &[AssessmentHistoryItem]) -> Vec<(String, Vec<AssessmentHistoryItem>)> {
+    let mut groups: Vec<(String, Vec<AssessmentHistoryItem>)> = Vec::new();
+    for item in items {
+        if let Some((label, values)) = groups.last_mut() {
+            if label == &item.day_label {
+                values.push(item.clone());
+                continue;
+            }
+        }
+        groups.push((item.day_label.clone(), vec![item.clone()]));
+    }
+    groups
+}
+
+fn remove_completed_assignment(items: &mut Vec<AssignmentSummary>, assignment_id: Uuid) -> usize {
+    let before = items.len();
+    items.retain(|item| item.id != assignment_id);
+    before.saturating_sub(items.len())
+}
+
+fn human_datetime(value: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ];
+    let Some(date) = value.get(0..10).filter(|date| valid_date(date)) else {
+        return "Дата недоступна".into();
+    };
+    let Ok(year) = date[0..4].parse::<u32>() else {
+        return "Дата недоступна".into();
+    };
+    let Ok(month) = date[5..7].parse::<usize>() else {
+        return "Дата недоступна".into();
+    };
+    let Ok(day) = date[8..10].parse::<u32>() else {
+        return "Дата недоступна".into();
+    };
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return "Дата недоступна".into();
+    }
+    let month_name = MONTHS.get(month.saturating_sub(1)).unwrap_or(&"месяца");
+    let date_label = format!("{day} {month_name} {year}");
+    value
+        .split('T')
+        .nth(1)
+        .and_then(|time| time.get(0..5))
+        .filter(|time| valid_time(time))
+        .map_or(date_label.clone(), |time| format!("{date_label}, {time}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn map_refresh_error(error: AccountApiError) -> AssessmentAttemptApiError {
+    match error {
+        AccountApiError::NetworkUnavailable => AssessmentAttemptApiError::NetworkUnavailable,
+        _ => AssessmentAttemptApiError::AuthenticationRequired,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn refreshed_token(
+    session: &AccountSessionAdapter,
+) -> Result<AccountAccessToken, AssessmentAttemptApiError> {
+    let state = session.refresh().await.map_err(map_refresh_error)?;
+    let AccountSessionState::Authenticated(value) = state else {
+        return Err(AssessmentAttemptApiError::AuthenticationRequired);
+    };
+    Ok(value.access_token)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn replace_draft_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    attempt_id: Uuid,
+    payload: &ReplaceDraftRequest,
+) -> Result<AttemptDocument, AssessmentAttemptApiError> {
+    match api.replace_draft(token, attempt_id, payload).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.replace_draft(&refreshed, attempt_id, payload).await
+        }
+        result => result,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn submit_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    attempt_id: Uuid,
+) -> Result<CompletionResult, AssessmentAttemptApiError> {
+    match api.submit(token, attempt_id).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.submit(&refreshed, attempt_id).await
+        }
+        result => result,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn history_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    company_id: Uuid,
+    period: &AssignmentHistoryPeriod,
+    cursor: Option<&str>,
+) -> Result<AssessmentHistoryPage, AssessmentAttemptApiError> {
+    match api.history(token, company_id, period, cursor).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.history(&refreshed, company_id, period, cursor).await
+        }
+        result => result,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn assignments_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    company_id: Uuid,
+    period: &AssignmentHistoryPeriod,
+) -> Result<Vec<AssignmentSummary>, AssessmentAttemptApiError> {
+    match api.list_assignments(token, company_id, period).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.list_assignments(&refreshed, company_id, period).await
+        }
+        result => result,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn result_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    company_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<AssessmentResultDetail, AssessmentAttemptApiError> {
+    match api.result(token, company_id, attempt_id).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.result(&refreshed, company_id, attempt_id).await
+        }
+        result => result,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn result_pdf_with_one_refresh(
+    api: &AssessmentAttemptApiClient,
+    session: &AccountSessionAdapter,
+    token: &AccountAccessToken,
+    company_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<Vec<u8>, AssessmentAttemptApiError> {
+    match api.result_pdf(token, company_id, attempt_id).await {
+        Err(AssessmentAttemptApiError::AuthenticationRequired) => {
+            let refreshed = refreshed_token(session).await?;
+            api.result_pdf(&refreshed, company_id, attempt_id).await
+        }
+        result => result,
+    }
+}
+
+async fn save_assessment_pdf(bytes: &[u8], local_date: &str) -> Result<(), ()> {
+    if !local_date
+        .bytes()
+        .all(|value| value.is_ascii_digit() || value == b'-')
+    {
+        return Err(());
+    }
+    let parts = js_sys::Array::new();
+    let array = js_sys::Uint8Array::from(bytes);
+    parts.push(&array.buffer());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("application/pdf");
+    let blob =
+        web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).map_err(|_| ())?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(|_| ())?;
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or(())?;
+    let anchor = document.create_element("a").map_err(|_| ())?;
+    anchor.set_attribute("href", &url).map_err(|_| ())?;
+    anchor
+        .set_attribute("download", &format!("restos-assessment-{local_date}.pdf"))
+        .map_err(|_| ())?;
+    anchor.set_attribute("hidden", "").map_err(|_| ())?;
+    document
+        .body()
+        .ok_or(())?
+        .append_child(&anchor)
+        .map_err(|_| ())?;
+    anchor.dyn_ref::<web_sys::HtmlElement>().ok_or(())?.click();
+    anchor.remove();
+    TimeoutFuture::new(0).await;
+    web_sys::Url::revoke_object_url(&url).map_err(|_| ())
+}
+
 fn save_label(status: SaveStatus) -> &'static str {
     match status {
         SaveStatus::Saved => "Сохранено",
@@ -565,6 +784,7 @@ pub fn AssessmentAttemptsPage(
     view: AssessmentListView,
     on_measure: EventHandler<()>,
     on_team: EventHandler<()>,
+    on_result: EventHandler<Uuid>,
     initial_attempt: Option<AttemptDocument>,
 ) -> Element {
     let session = use_context::<AccountSessionAdapter>();
@@ -577,12 +797,19 @@ pub fn AssessmentAttemptsPage(
     let save_generation = use_signal(|| 0_u64);
     let submit_generation = use_signal(|| 0_u64);
     let mut assignments = use_signal(Vec::<AssignmentSummary>::new);
-    let mut history_period = use_signal(|| "today".to_string());
+    let mut history_items = use_signal(Vec::<AssessmentHistoryItem>::new);
+    let mut history_cursor = use_signal(|| None::<String>);
+    let mut history_request_cursor = use_signal(|| None::<String>);
+    let mut history_loading_more = use_signal(|| false);
+    let mut history_period = use_signal(|| "all".to_string());
     let mut history_from = use_signal(String::new);
     let mut history_to = use_signal(String::new);
     let mut loading = use_signal(|| true);
     let mut error = use_signal(|| None::<String>);
     let mut opening = use_signal(|| None::<Uuid>);
+    let mut pdf_busy = use_signal(|| None::<Uuid>);
+    let mut pdf_error = use_signal(|| None::<String>);
+    let mut pdf_generation = use_signal(|| 0_u64);
     let initial_draft = initial_attempt.as_ref().map(DraftState::from_attempt);
     let has_initial_attempt = initial_attempt.is_some();
     let mut attempt = use_signal(|| initial_attempt);
@@ -592,6 +819,16 @@ pub fn AssessmentAttemptsPage(
     let confirming_submit = use_signal(|| false);
     let submitting = use_signal(|| false);
     let submit_requested = use_signal(|| false);
+
+    use_effect(move || {
+        if completion().is_some() {
+            if let Some(completed) = attempt() {
+                assignments.with_mut(|items| {
+                    remove_completed_assignment(items, completed.assignment_id);
+                });
+            }
+        }
+    });
 
     let load_session = session.clone();
     let load_api = api.clone();
@@ -610,6 +847,7 @@ pub fn AssessmentAttemptsPage(
         let period_code = history_period();
         let custom_from = history_from();
         let custom_to = history_to();
+        let request_cursor = history_request_cursor();
         let state = load_session.state();
         let company = match &state {
             AccountSessionState::Authenticated(value) => value.selected_company.map(|id| id.0),
@@ -618,15 +856,28 @@ pub fn AssessmentAttemptsPage(
         if *scoped_company.peek() != company {
             scoped_company.set(company);
             company_generation += 1;
+            history_request_cursor.set(None);
+            history_cursor.set(None);
+            history_items.set(Vec::new());
         }
         let operation_company_generation = *company_generation.peek();
         let generation = list_generation();
         assignments.set(Vec::new());
+        if view == AssessmentListView::History {
+            if request_cursor.is_none() {
+                history_items.set(Vec::new());
+                loading.set(true);
+            } else {
+                history_loading_more.set(true);
+            }
+        }
         attempt.set(None);
         draft.set(None);
         completion.set(None);
         error.set(None);
-        loading.set(true);
+        if view != AssessmentListView::History {
+            loading.set(true);
+        }
         let Some((token, company_id)) = (match state {
             AccountSessionState::Authenticated(value) => company.map(|id| (value.access_token, id)),
             _ => None,
@@ -640,6 +891,7 @@ pub fn AssessmentAttemptsPage(
         let operation_epoch = lifecycle_epoch();
         spawn(async move {
             let period = match period_code.as_str() {
+                "all" => AssignmentHistoryPeriod::AllTime,
                 "yesterday" => AssignmentHistoryPeriod::Yesterday,
                 "previous_week" => AssignmentHistoryPeriod::PreviousWeek,
                 "previous_month" => AssignmentHistoryPeriod::PreviousMonth,
@@ -649,7 +901,60 @@ pub fn AssessmentAttemptsPage(
                 },
                 _ => AssignmentHistoryPeriod::Today,
             };
-            let result = api.list_assignments(&token, company_id, &period).await;
+            if view == AssessmentListView::History {
+                let result = history_with_one_refresh(
+                    &api,
+                    &session,
+                    &token,
+                    company_id,
+                    &period,
+                    request_cursor.as_deref(),
+                )
+                .await;
+                let current_company = match session.state() {
+                    AccountSessionState::Authenticated(value) => {
+                        value.selected_company.map(|id| id.0)
+                    }
+                    _ => None,
+                };
+                if !list_result_is_current(
+                    list_generation(),
+                    generation,
+                    *company_generation.peek(),
+                    operation_company_generation,
+                    lifecycle_epoch(),
+                    operation_epoch,
+                    current_company,
+                    Some(company_id),
+                ) {
+                    return;
+                }
+                loading.set(false);
+                history_loading_more.set(false);
+                match result {
+                    Ok(page) => {
+                        if request_cursor.is_some() {
+                            history_items.with_mut(|current| {
+                                for item in page.items {
+                                    if !current
+                                        .iter()
+                                        .any(|value| value.attempt_id == item.attempt_id)
+                                    {
+                                        current.push(item);
+                                    }
+                                }
+                            });
+                        } else {
+                            history_items.set(page.items);
+                        }
+                        history_cursor.set(page.next_cursor);
+                    }
+                    Err(problem) => error.set(Some(safe_error(&problem).into())),
+                }
+                return;
+            }
+            let result =
+                assignments_with_one_refresh(&api, &session, &token, company_id, &period).await;
             let current_company = match session.state() {
                 AccountSessionState::Authenticated(value) => value.selected_company.map(|id| id.0),
                 _ => None,
@@ -680,8 +985,101 @@ pub fn AssessmentAttemptsPage(
     });
 
     if let Some(active) = attempt() {
-        return rsx! { AttemptEditor { active, attempt, draft, completion, current_section, confirming_submit, submitting, submit_requested, attempt_generation, save_generation, submit_generation, on_team } };
+        return rsx! { AttemptEditor { active, attempt, draft, completion, current_section, confirming_submit, submitting, submit_requested, attempt_generation, save_generation, submit_generation, on_team, on_result: on_result.clone() } };
     }
+
+    let assignment_session = session.clone();
+    let assignment_api = api.clone();
+    let open_assignment = EventHandler::new(move |id: Uuid| {
+        let Some(item) = assignments().into_iter().find(|item| item.id == id) else {
+            return;
+        };
+        let action = assignment_action(&item.status, item.read_only);
+        if !attempt_action_is_admitted(action, opening().is_some()) {
+            return;
+        }
+        let token = match assignment_session.state() {
+            AccountSessionState::Authenticated(value) => value.access_token,
+            _ => {
+                error.set(Some("Сессия недоступна. Войдите снова.".into()));
+                return;
+            }
+        };
+        opening.set(Some(id));
+        attempt_generation += 1;
+        let generation = attempt_generation();
+        let operation_epoch = lifecycle_epoch();
+        let operation_company_generation = company_generation();
+        let api = assignment_api.clone();
+        spawn(async move {
+            let result = api.create_or_resume(&token, id).await;
+            if attempt_generation() != generation
+                || lifecycle_epoch() != operation_epoch
+                || company_generation() != operation_company_generation
+            {
+                return;
+            }
+            opening.set(None);
+            match result {
+                Ok(value) => {
+                    draft.set(Some(DraftState::from_attempt(&value)));
+                    attempt.set(Some(value));
+                    current_section.set(0);
+                }
+                Err(problem) => error.set(Some(safe_error(&problem).into())),
+            }
+        });
+    });
+    let open_result = EventHandler::new(move |id: Uuid| on_result.call(id));
+    let pdf_session = session.clone();
+    let pdf_api = api.clone();
+    let download_pdf = EventHandler::new(move |id: Uuid| {
+        if pdf_busy().is_some() {
+            return;
+        }
+        let Some(item) = history_items()
+            .into_iter()
+            .find(|item| item.attempt_id == id && item.pdf_available)
+        else {
+            return;
+        };
+        let AccountSessionState::Authenticated(account) = pdf_session.state() else {
+            pdf_error.set(Some("Сессия недоступна. Войдите снова.".into()));
+            return;
+        };
+        let Some(company_id) = account.selected_company.map(|value| value.0) else {
+            pdf_error.set(Some("Выберите организацию.".into()));
+            return;
+        };
+        pdf_busy.set(Some(id));
+        pdf_error.set(None);
+        pdf_generation += 1;
+        let generation = pdf_generation();
+        let operation_epoch = lifecycle_epoch();
+        let operation_company_generation = company_generation();
+        let api = pdf_api.clone();
+        let session = pdf_session.clone();
+        spawn(async move {
+            let result =
+                result_pdf_with_one_refresh(&api, &session, &account.access_token, company_id, id)
+                    .await;
+            if pdf_generation() != generation
+                || lifecycle_epoch() != operation_epoch
+                || company_generation() != operation_company_generation
+            {
+                return;
+            }
+            pdf_busy.set(None);
+            match result {
+                Ok(bytes) => {
+                    if save_assessment_pdf(&bytes, &item.local_date).await.is_err() {
+                        pdf_error.set(Some("Не удалось сохранить PDF.".into()));
+                    }
+                }
+                Err(problem) => pdf_error.set(Some(safe_error(&problem).into())),
+            }
+        });
+    });
 
     rsx! {
         section { class: "attempt-page", aria_labelledby: "assigned-assessments-title",
@@ -701,9 +1099,11 @@ pub fn AssessmentAttemptsPage(
                             value: history_period(),
                             onchange: move |event| {
                                 history_period.set(event.value());
+                                history_request_cursor.set(None);
+                                history_cursor.set(None);
                                 list_generation += 1;
                             },
-                            option { value: "today", "Сегодня" }
+                            option { value: "all", "Все время" }
                             option { value: "yesterday", "Вчера" }
                             option { value: "previous_week", "Прошлая неделя" }
                             option { value: "previous_month", "Прошлый месяц" }
@@ -711,8 +1111,8 @@ pub fn AssessmentAttemptsPage(
                         }
                     }
                     if history_period() == "custom" {
-                        label { span { "С" } input { r#type: "date", value: history_from(), onchange: move |event| { history_from.set(event.value()); list_generation += 1; } } }
-                        label { span { "По" } input { r#type: "date", value: history_to(), onchange: move |event| { history_to.set(event.value()); list_generation += 1; } } }
+                        label { span { "С" } input { r#type: "date", value: history_from(), onchange: move |event| { history_from.set(event.value()); history_request_cursor.set(None); history_cursor.set(None); list_generation += 1; } } }
+                        label { span { "По" } input { r#type: "date", value: history_to(), onchange: move |event| { history_to.set(event.value()); history_request_cursor.set(None); history_cursor.set(None); list_generation += 1; } } }
                     }
                     p { "Период применяется к завершённой истории по дате отправки." }
                 }
@@ -723,20 +1123,18 @@ pub fn AssessmentAttemptsPage(
                     p { "Пока нет утверждённых targets и формулы. Значения не подменяются демонстрационными данными." }
                 }
             }
-            div { class: if error().is_some() { "account-live account-live--error" } else { "account-live" }, role: if error().is_some() { "alert" } else { "status" }, aria_live: if error().is_some() { "assertive" } else { "polite" }, if let Some(message) = error() { "{message}" } }
-            if loading() { p { class: "account-muted", "Загрузка назначений..." } }
-            else if error().is_some() { button { class: "btn-secondary", r#type: "button", onclick: move |_| list_generation += 1, "Повторить" } }
-            else if assignments().is_empty() && view != AssessmentListView::Planned { div { class: "account-empty", p { "Назначенных оценок пока нет." } } }
-            else {
-                { let open_assignment = EventHandler::new(move |id: Uuid| {
-                    let Some(item) = assignments().into_iter().find(|item| item.id == id) else { return; };
-                    let action = assignment_action(&item.status, item.read_only);
-                    if !attempt_action_is_admitted(action, opening().is_some()) { return; }
-                    let token = match session.state() { AccountSessionState::Authenticated(value) => value.access_token, _ => { error.set(Some("Сессия недоступна. Войдите снова.".into())); return; } };
-                    opening.set(Some(id)); attempt_generation += 1; let generation = attempt_generation(); let operation_epoch = lifecycle_epoch(); let operation_company_generation = company_generation(); let api = api.clone();
-                    spawn(async move { let result = api.create_or_resume(&token, id).await; if attempt_generation() != generation || lifecycle_epoch() != operation_epoch || company_generation() != operation_company_generation { return; } opening.set(None); match result { Ok(value) => { draft.set(Some(DraftState::from_attempt(&value))); attempt.set(Some(value)); current_section.set(0); }, Err(problem) => error.set(Some(safe_error(&problem).into())) } });
-                });
-                rsx! {
+            div { class: if error().is_some() || pdf_error().is_some() { "account-live account-live--error" } else { "account-live" }, role: if error().is_some() || pdf_error().is_some() { "alert" } else { "status" }, aria_live: if error().is_some() || pdf_error().is_some() { "assertive" } else { "polite" },
+                if let Some(message) = error().or_else(|| pdf_error()) { "{message}" }
+            }
+            if loading() { p { class: "account-muted", "Загрузка оценок..." } }
+            if error().is_some() { button { class: "btn-secondary", r#type: "button", onclick: move |_| list_generation += 1, "Повторить" } }
+            if !loading() && view == AssessmentListView::Active && assignments().iter().all(|item| !matches!(item.status.as_str(), "assigned" | "in_progress")) {
+                div { class: "account-empty", p { "Активных оценок пока нет." } }
+            }
+            if !loading() && view == AssessmentListView::History && history_items().is_empty() {
+                div { class: "account-empty", p { "В выбранном периоде история пуста." } }
+            }
+            if !loading() && view != AssessmentListView::Planned {
                     if view == AssessmentListView::Active {
                         section { class: "attempt-assignment-group", aria_labelledby: "active-assessments-title",
                             h2 { id: "active-assessments-title", "Активные" }
@@ -750,24 +1148,189 @@ pub fn AssessmentAttemptsPage(
                     if view == AssessmentListView::History {
                         section { class: "attempt-assignment-group", aria_labelledby: "assessment-history-title",
                             h2 { id: "assessment-history-title", "История" }
-                            div { class: "attempt-assignment-list",
-                                for item in assignments().into_iter().filter(|item| item.status == "completed") {
-                                    AssignmentCard { key: "history-{item.id}", item, opening: opening(), on_open: open_assignment.clone() }
+                            for (day_label, items) in grouped_history(&history_items()) {
+                                section { class: "assessment-history-day", aria_label: "{day_label}",
+                                    h3 { "{day_label}" }
+                                    div { class: "attempt-assignment-list",
+                                        for item in items {
+                                            HistoryCard { key: "history-{item.attempt_id}", item, pdf_busy: pdf_busy(), on_open: open_result.clone(), on_pdf: download_pdf.clone() }
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        if assignments().iter().any(|item| !matches!(item.status.as_str(), "assigned" | "in_progress" | "completed")) {
-                            section { class: "attempt-assignment-group", aria_labelledby: "inactive-assessments-title",
-                                h2 { id: "inactive-assessments-title", "Недоступные" }
-                                div { class: "attempt-assignment-list",
-                                    for item in assignments().into_iter().filter(|item| !matches!(item.status.as_str(), "assigned" | "in_progress" | "completed")) {
-                                        AssignmentCard { key: "inactive-{item.id}", item, opening: opening(), on_open: open_assignment.clone() }
-                                    }
+                            if let Some(cursor) = history_cursor() {
+                                button { class: "btn-secondary assessment-history-more", r#type: "button", disabled: history_loading_more(), onclick: move |_| { history_request_cursor.set(Some(cursor.clone())); list_generation += 1; },
+                                    if history_loading_more() { "Загрузка..." } else { "Показать ещё" }
                                 }
                             }
                         }
                     }
-                } }
+            }
+        }
+    }
+}
+
+fn result_answer_text(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => if *value { "Да" } else { "Нет" }.into(),
+        Value::Number(value) => value.to_string(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "—".into(),
+    }
+}
+
+#[component]
+pub fn AssessmentResultPage(attempt_id: Uuid, on_back: EventHandler<()>) -> Element {
+    let session = use_context::<AccountSessionAdapter>();
+    let api = use_context::<AssessmentAttemptApiClient>();
+    let lifecycle_epoch = use_context::<Signal<u64>>();
+    let mut operation_generation = use_signal(|| 0_u64);
+    let mut reload_generation = use_signal(|| 0_u64);
+    let mut result = use_signal(|| None::<AssessmentResultDetail>);
+    let mut loading = use_signal(|| true);
+    let mut error = use_signal(|| None::<String>);
+    let mut pdf_busy = use_signal(|| false);
+
+    let load_session = session.clone();
+    let load_api = api.clone();
+    use_effect(move || {
+        let _reload = reload_generation();
+        let state = load_session.state();
+        let Some((token, company_id)) = (match state {
+            AccountSessionState::Authenticated(value) => value
+                .selected_company
+                .map(|company| (value.access_token, company.0)),
+            _ => None,
+        }) else {
+            loading.set(false);
+            error.set(Some("Сессия недоступна. Войдите снова.".into()));
+            return;
+        };
+        operation_generation.with_mut(|value| *value += 1);
+        let current_generation = *operation_generation.peek();
+        let operation_epoch = lifecycle_epoch();
+        loading.set(true);
+        error.set(None);
+        result.set(None);
+        let api = load_api.clone();
+        let session = load_session.clone();
+        spawn(async move {
+            let loaded =
+                result_with_one_refresh(&api, &session, &token, company_id, attempt_id).await;
+            if operation_generation() != current_generation || lifecycle_epoch() != operation_epoch
+            {
+                return;
+            }
+            loading.set(false);
+            match loaded {
+                Ok(value) if value.company_id == company_id && value.attempt_id == attempt_id => {
+                    result.set(Some(value));
+                }
+                Ok(_) => error.set(Some("Результат недоступен.".into())),
+                Err(problem) => error.set(Some(safe_error(&problem).into())),
+            }
+        });
+    });
+
+    let download_session = session.clone();
+    let download_api = api.clone();
+    let download = EventHandler::new(move |_| {
+        if pdf_busy() {
+            return;
+        }
+        let AccountSessionState::Authenticated(account) = download_session.state() else {
+            error.set(Some("Сессия недоступна.".into()));
+            return;
+        };
+        let Some(company_id) = account.selected_company.map(|value| value.0) else {
+            error.set(Some("Выберите организацию.".into()));
+            return;
+        };
+        let local_date = result()
+            .and_then(|value| value.local_submitted_at.get(0..10).map(str::to_string))
+            .unwrap_or_default();
+        pdf_busy.set(true);
+        error.set(None);
+        operation_generation.with_mut(|value| *value += 1);
+        let current_generation = *operation_generation.peek();
+        let operation_epoch = lifecycle_epoch();
+        let api = download_api.clone();
+        let session = download_session.clone();
+        spawn(async move {
+            let loaded = result_pdf_with_one_refresh(
+                &api,
+                &session,
+                &account.access_token,
+                company_id,
+                attempt_id,
+            )
+            .await;
+            if operation_generation() != current_generation || lifecycle_epoch() != operation_epoch
+            {
+                return;
+            }
+            pdf_busy.set(false);
+            match loaded {
+                Ok(bytes) if save_assessment_pdf(&bytes, &local_date).await.is_ok() => {}
+                Ok(_) => error.set(Some("Не удалось сохранить PDF.".into())),
+                Err(problem) => error.set(Some(safe_error(&problem).into())),
+            }
+        });
+    });
+
+    rsx! {
+        section { class: "attempt-page assessment-result-page", aria_labelledby: "assessment-result-title",
+            button { class: "btn-ghost assessment-result-back", r#type: "button", onclick: move |_| on_back.call(()), "← Вернуться в историю" }
+            if loading() { p { class: "account-muted", role: "status", "Загрузка результа..." } }
+            if let Some(message) = error() {
+                div { class: "account-live account-live--error", role: "alert", "{message}" }
+                button { class: "btn-secondary", r#type: "button", onclick: move |_| reload_generation += 1, "Повторить" }
+            }
+            if let Some(value) = result() {
+                header { class: "attempt-result-header",
+                    div {
+                        p { class: "management-eyebrow", "ИТОГОВЫЙ РЕЗУЛЬТАТ" }
+                        h1 { id: "assessment-result-title", "{value.template_name}" }
+                        p { "Завершён · {human_datetime(&value.local_submitted_at)}" }
+                        if let Some(venue) = value.venue_name.as_ref() { p { "Ресторан: {venue}" } }
+                        p { "Объект оценки: {value.subject_name}" }
+                    }
+                    if let Some(score) = value.score_display.as_ref() { strong { class: "assessment-result-score", "{score}" } }
+                }
+                div { class: "attempt-result-actions",
+                    button { class: "btn-primary", r#type: "button", disabled: pdf_busy(), onclick: move |_| download.call(()), if pdf_busy() { "Подготовка PDF..." } else { "Скачать PDF" } }
+                }
+                if value.critical_failure_count > 0 || value.stop_factor_count > 0 {
+                    div { class: "journey-warning", role: "status", "Критических отклонений: {value.critical_failure_count}; стоп-факторов: {value.stop_factor_count}." }
+                }
+                for (section_index, section) in value.sections.iter().enumerate() {
+                    section { class: "assessment-result-section", aria_labelledby: "result-section-{section_index}",
+                        header {
+                            h2 { id: "result-section-{section_index}", "{section.title}" }
+                            if let Some(score) = section.score_display.as_ref() { strong { "{score}" } }
+                        }
+                        div { class: "assessment-result-answers",
+                            for (item_index, item) in section.items.iter().enumerate() {
+                                article { class: "assessment-result-answer", key: "answer-{section_index}-{item_index}",
+                                    h3 { "{item.prompt}" }
+                                    p { class: "assessment-result-answer__value", "{result_answer_text(&item.value)}" }
+                                    if let Some(comment) = item.comment.as_ref() { p { class: "assessment-result-answer__comment", "Комментарий: {comment}" } }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !value.related_tasks.is_empty() {
+                    section { class: "assessment-result-section", aria_labelledby: "assessment-result-tasks",
+                        h2 { id: "assessment-result-tasks", "Связанные задачи" }
+                        ul { for task in value.related_tasks.iter() { li { "{task.title} · {task.status}" } } }
+                    }
+                }
             }
         }
     }
@@ -786,13 +1349,73 @@ fn AssignmentCard(
             div {
                 h3 { "{item.template_name}" }
                 p { "{assignment_status(&item.status, item.read_only)}" }
-                small { "Назначено: {item.assigned_at}" }
-                if let Some(submitted) = item.submitted_at.as_ref() { small { "Отправлено: {submitted}" } }
-                if let Some(due) = item.due_at.as_ref() { small { "Срок: {due}" } }
+                small { "Назначено: {human_datetime(&item.assigned_at)}" }
+                if let Some(submitted) = item.submitted_at.as_ref() { small { "Отправлено: {human_datetime(submitted)}" } }
+                if let Some(due) = item.due_at.as_ref() { small { "Срок: {human_datetime(due)}" } }
             }
             if let Some(action) = action {
                 button { class: "btn-primary", r#type: "button", disabled: opening.is_some(), onclick: move |_| on_open.call(id),
                     if opening == Some(id) { "Открытие..." } else { "{action.label()}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn HistoryCard(
+    item: AssessmentHistoryItem,
+    pdf_busy: Option<Uuid>,
+    on_open: EventHandler<Uuid>,
+    on_pdf: EventHandler<Uuid>,
+) -> Element {
+    let id = item.attempt_id;
+    let open_label = format!(
+        "{}; {}; {}; {}",
+        item.template_name,
+        assignment_status(&item.status, true),
+        item.day_label,
+        item.score_display
+            .clone()
+            .unwrap_or_else(|| "без показателя".into())
+    );
+    rsx! {
+        article {
+            class: "attempt-assignment-card assessment-history-card",
+            role: if item.has_result { "button" } else { "group" },
+            tabindex: if item.has_result { "0" } else { "-1" },
+            aria_label: "{open_label}",
+            onclick: move |_| if item.has_result { on_open.call(id); },
+            onkeydown: move |event| {
+                let key = event.key();
+                if item.has_result
+                    && (key == Key::Enter || key == Key::Character(" ".into()))
+                {
+                    event.prevent_default();
+                    on_open.call(id);
+                }
+            },
+            div {
+                h4 { "{item.template_name}" }
+                p { "{assignment_status(&item.status, true)}" }
+                small { "{human_datetime(&item.local_event_at)}" }
+                if let Some(venue) = item.venue_name.as_ref() { small { "Ресторан: {venue}" } }
+                small { "Объект оценки: {item.subject_name}" }
+            }
+            div { class: "assessment-history-card__actions",
+                if let Some(score) = item.score_display.as_ref() { strong { class: "assessment-history-score", "{score}" } }
+                if item.pdf_available {
+                    button {
+                        class: "btn-secondary assessment-history-pdf",
+                        r#type: "button",
+                        aria_label: "Скачать PDF результа {item.template_name}",
+                        disabled: pdf_busy.is_some(),
+                        onclick: move |event| { event.stop_propagation(); on_pdf.call(id); },
+                        onkeydown: move |event| event.stop_propagation(),
+                        if pdf_busy == Some(id) { "Подготовка PDF..." } else { "Скачать PDF" }
+                    }
+                } else {
+                    span { class: "account-muted", "PDF недоступен" }
                 }
             }
         }
@@ -808,6 +1431,7 @@ fn assignment_status(status: &str, read_only: bool) -> &'static str {
             "in_progress" => "В процессе",
             "completed" => "Завершена",
             "revoked" => "Отозвана",
+            "expired" => "Истекла",
             _ => "Недоступна",
         }
     }
@@ -876,6 +1500,7 @@ fn AttemptEditor(
     mut save_generation: Signal<u64>,
     mut submit_generation: Signal<u64>,
     on_team: EventHandler<()>,
+    on_result: EventHandler<Uuid>,
 ) -> Element {
     let session = use_context::<AccountSessionAdapter>();
     let api = use_context::<AssessmentAttemptApiClient>();
@@ -889,7 +1514,7 @@ fn AttemptEditor(
     let mut quick_task_busy = use_signal(|| false);
     let mut quick_task_error = use_signal(|| None::<String>);
     let mut quick_task_created = use_signal(|| false);
-    let mut result_details_open = use_signal(|| false);
+    let result_details_open = use_signal(|| false);
     let mut completion_task_reload = use_signal(|| 0_u64);
     let rendered_order = draft()
         .map(|state| state.section_order)
@@ -1087,10 +1712,10 @@ fn AttemptEditor(
                 h2 { id: "attempt-complete-title", "Замер завершён и сохранён" }
                 p { "Замер: оценка по выбранному шаблону" }
                 p { "Ресторан: выбранный для назначения" }
-                p { "Отправлено: {result.submitted_at}" }
+                p { "Отправлено: только что" }
                 p { "Ответов: {result.answered_count} из {result.total_count}; обязательных: {result.required_count}" }
                 if let Some(score) = result.score_percent.as_deref() {
-                    p { "Итоговый показатель: {score}%" }
+                    { let score_display = format_percent(score).unwrap_or_else(|| "—".into()); rsx! { p { "Итоговый показатель: {score_display}" } } }
                     if let Some(coverage) = result.coverage.as_deref() {
                         p { "Полнота данных: {coverage}" }
                     }
@@ -1111,7 +1736,7 @@ fn AttemptEditor(
                             for section in result.sections.iter() {
                                 li {
                                     if let Some(score) = section.score_percent.as_deref() {
-                                        strong { "{section.title}: {score}%" }
+                                        { let score_display = format_percent(score).unwrap_or_else(|| "—".into()); rsx! { strong { "{section.title}: {score_display}" } } }
                                     } else {
                                         strong { "{section.title}: нет данных" }
                                     }
@@ -1154,7 +1779,7 @@ fn AttemptEditor(
                 }
                 div { class: "attempt-result-actions",
                     button { class: "btn-primary", r#type: "button", onclick: move |_| { attempt_generation += 1; attempt.set(None); draft.set(None); completion.set(None); }, "Готово" }
-                    button { class: "btn-secondary", r#type: "button", onclick: move |_| result_details_open.set(true), "Открыть результат" }
+                    button { class: "btn-secondary", r#type: "button", onclick: move |_| on_result.call(active.id), "Посмотреть результат" }
                     if completion_tasks().is_some_and(|value| value.is_some_and(|result| result.is_ok_and(|tasks| !tasks.is_empty()))) {
                         button { class: "btn-secondary", r#type: "button", onclick: move |_| on_team.call(()), "Проверить и отправить задачи" }
                     }
@@ -1465,7 +2090,8 @@ fn schedule_autosave(
             state.in_flight = true;
             state.status = SaveStatus::Saving;
         }
-        let result = api.replace_draft(&token, active.id, &payload).await;
+        let result =
+            replace_draft_with_one_refresh(&api, &session, &token, active.id, &payload).await;
         if attempt_generation() != scheduled_attempt_generation
             || lifecycle_epoch() != scheduled_lifecycle_epoch
         {
@@ -1552,7 +2178,7 @@ fn start_submit(
             AccountSessionState::Authenticated(value) => value.access_token,
             _ => return,
         };
-        let result = api.submit(&token, attempt_id).await;
+        let result = submit_with_one_refresh(&api, &session, &token, attempt_id).await;
         if attempt_generation() != operation_attempt_generation
             || lifecycle_epoch() != operation_lifecycle_epoch
             || submit_generation() != operation_submit_generation
@@ -1614,6 +2240,21 @@ mod tests {
                 label: "A".into(),
                 sort_order: 1,
             }],
+        }
+    }
+
+    fn assignment(id: u128, status: &str) -> AssignmentSummary {
+        AssignmentSummary {
+            id: Uuid::from_u128(id),
+            company_id: Uuid::from_u128(100),
+            venue_id: None,
+            status: status.into(),
+            assigned_at: "2026-08-15T19:28:00+03:00".into(),
+            due_at: None,
+            submitted_at: None,
+            template_name: "Синтетический замер".into(),
+            template_version: 1,
+            read_only: false,
         }
     }
 
@@ -1805,6 +2446,30 @@ mod tests {
     fn stage23e_completed_summary_fails_closed_without_attempt_identifier() {
         assert_eq!(assignment_action("completed", true), None);
         assert_eq!(assignment_action("completed", false), None);
+    }
+
+    #[wasm_bindgen_test]
+    fn assessment_history_completion_removes_active_assignment_once() {
+        let mut items = vec![assignment(1, "in_progress"), assignment(2, "assigned")];
+        assert_eq!(
+            remove_completed_assignment(&mut items, Uuid::from_u128(1)),
+            1
+        );
+        assert_eq!(items, vec![assignment(2, "assigned")]);
+        assert_eq!(
+            remove_completed_assignment(&mut items, Uuid::from_u128(1)),
+            0
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn assessment_history_dates_are_human_readable_and_hide_timezone() {
+        assert_eq!(
+            human_datetime("2026-08-15T19:28:00+03:00"),
+            "15 августа 2026, 19:28"
+        );
+        assert_eq!(human_datetime("2026-08-15"), "15 августа 2026");
+        assert_eq!(human_datetime("Europe/Moscow"), "Дата недоступна");
     }
 
     #[wasm_bindgen_test]

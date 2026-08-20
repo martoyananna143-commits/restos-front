@@ -7,6 +7,7 @@ use crate::{
     organization_workflow_api::{
         OrganizationTask, OrganizationWorkflowApiClient, OrganizationWorkflowApiError,
     },
+    presentation_percent::format_percent,
     restaurant_metrics_api::{RestaurantMetricDashboard, RestaurantMetricsApiClient},
     workforce_api::{WorkforceApiClient, WorkforceApiError, WorkforceVenue},
 };
@@ -196,7 +197,10 @@ pub fn AccountToday(
                                 ul {
                                     for metric in dashboard.metrics.iter() {
                                         for component in metric.components.iter() {
-                                            li { "{metric.title}: {component.score_percent}% · {component.source_type}" }
+                                            {
+                                                let score = format_percent(&component.score_percent).unwrap_or_else(|| "—".into());
+                                                rsx! { li { "{metric.title}: {score} · {component.source_type}" } }
+                                            }
                                         }
                                     }
                                 }

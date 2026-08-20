@@ -39,6 +39,7 @@ pub struct AssignmentSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssignmentHistoryPeriod {
+    AllTime,
     Today,
     Yesterday,
     PreviousWeek,
@@ -49,6 +50,7 @@ pub enum AssignmentHistoryPeriod {
 impl AssignmentHistoryPeriod {
     fn query(&self) -> Option<String> {
         match self {
+            Self::AllTime => Some("history_period=all".into()),
             Self::Today => Some("history_period=today".into()),
             Self::Yesterday => Some("history_period=yesterday".into()),
             Self::PreviousWeek => Some("history_period=previous_week".into()),
@@ -65,6 +67,26 @@ impl AssignmentHistoryPeriod {
     }
 }
 
+fn history_list_path(
+    company_id: Uuid,
+    period: &AssignmentHistoryPeriod,
+    cursor: Option<&str>,
+) -> Result<String, AssessmentAttemptApiError> {
+    let query = period
+        .query()
+        .ok_or(AssessmentAttemptApiError::InvalidRequest)?;
+    let cursor = match cursor {
+        Some(value) if !value.is_empty() && value.len() <= 256 => {
+            format!("&cursor={}", urlencoding::encode(value))
+        }
+        Some(_) => return Err(AssessmentAttemptApiError::InvalidRequest),
+        None => String::new(),
+    };
+    Ok(format!(
+        "/api/v1/account/assessment-history?company_id={company_id}&{query}&limit=30{cursor}"
+    ))
+}
+
 fn valid_iso_date(value: &str) -> bool {
     value.len() == 10
         && value.as_bytes().get(4) == Some(&b'-')
@@ -79,6 +101,11 @@ fn assignment_list_path(
     company_id: Uuid,
     period: &AssignmentHistoryPeriod,
 ) -> Result<String, AssessmentAttemptApiError> {
+    if period == &AssignmentHistoryPeriod::AllTime {
+        return Ok(format!(
+            "/api/v1/account/assessment-assignments?company_id={company_id}"
+        ));
+    }
     let query = period
         .query()
         .ok_or(AssessmentAttemptApiError::InvalidRequest)?;
@@ -101,6 +128,34 @@ pub struct AssignmentDetail {
     pub template_version: i32,
     pub read_only: bool,
     pub document: TemplateDocument,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentHistoryPage {
+    pub items: Vec<AssessmentHistoryItem>,
+    pub next_cursor: Option<String>,
+    pub company_timezone: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentHistoryItem {
+    pub attempt_id: Uuid,
+    pub template_name: String,
+    pub template_version: i32,
+    pub status: String,
+    pub event_at: String,
+    pub local_event_at: String,
+    pub local_date: String,
+    pub day_label: String,
+    pub timezone: String,
+    pub venue_name: Option<String>,
+    pub subject_name: String,
+    pub score_percent: Option<String>,
+    pub score_display: Option<String>,
+    pub has_result: bool,
+    pub pdf_available: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -266,6 +321,60 @@ pub struct WeightedSectionResult {
     pub stop_factor_count: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentResultDetail {
+    pub attempt_id: Uuid,
+    pub company_id: Uuid,
+    pub venue_id: Option<Uuid>,
+    pub template_name: String,
+    pub template_version: i32,
+    pub status: String,
+    pub venue_name: Option<String>,
+    pub subject_name: String,
+    pub submitted_at: String,
+    pub local_submitted_at: String,
+    pub timezone: String,
+    pub scoring_algorithm: CompletionAlgorithm,
+    pub score_percent: Option<String>,
+    pub score_display: Option<String>,
+    pub answered_count: usize,
+    pub required_count: usize,
+    pub total_count: usize,
+    pub critical_failure_count: usize,
+    pub stop_factor_count: usize,
+    pub sections: Vec<AssessmentResultSection>,
+    pub related_tasks: Vec<AssessmentResultTask>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentResultSection {
+    pub title: String,
+    pub score_percent: Option<String>,
+    pub score_display: Option<String>,
+    pub coverage: Option<String>,
+    pub critical_failure_count: usize,
+    pub stop_factor_count: usize,
+    pub items: Vec<AssessmentResultAnswer>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentResultAnswer {
+    pub prompt: String,
+    pub answer_type: String,
+    pub value: Value,
+    pub comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssessmentResultTask {
+    pub title: String,
+    pub status: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub enum CompletionAlgorithm {
     #[serde(rename = "completion_v1")]
@@ -288,8 +397,9 @@ impl AssessmentAttemptApiClient {
         Ok(Self { base_url })
     }
 
-    pub const fn routes() -> [&'static str; 7] {
+    pub const fn routes() -> [&'static str; 9] {
         [
+            "/api/v1/account/assessment-history",
             "/api/v1/account/assessment-assignments",
             "/api/v1/account/assessment-assignments/{assignment_id}",
             "/api/v1/account/assessment-assignments/{assignment_id}/attempt",
@@ -297,7 +407,20 @@ impl AssessmentAttemptApiClient {
             "/api/v1/account/assessment-attempts/{attempt_id}/draft",
             "/api/v1/account/assessment-attempts/{attempt_id}/submit",
             "/api/v1/account/assessment-attempts/{attempt_id}/result",
+            "/api/v1/account/assessment-attempts/{attempt_id}/result.pdf",
         ]
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn history(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        period: &AssignmentHistoryPeriod,
+        cursor: Option<&str>,
+    ) -> Result<AssessmentHistoryPage, AssessmentAttemptApiError> {
+        self.get(&history_list_path(company_id, period, cursor)?, token)
+            .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -388,13 +511,42 @@ impl AssessmentAttemptApiClient {
     pub async fn result(
         &self,
         token: &AccountAccessToken,
+        company_id: Uuid,
         id: Uuid,
-    ) -> Result<CompletionResult, AssessmentAttemptApiError> {
+    ) -> Result<AssessmentResultDetail, AssessmentAttemptApiError> {
         self.get(
-            &format!("/api/v1/account/assessment-attempts/{id}/result"),
+            &format!("/api/v1/account/assessment-attempts/{id}/result?company_id={company_id}"),
             token,
         )
         .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn result_pdf(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        id: Uuid,
+    ) -> Result<Vec<u8>, AssessmentAttemptApiError> {
+        let response = Request::get(&format!(
+            "{}/api/v1/account/assessment-attempts/{id}/result.pdf?company_id={company_id}",
+            self.base_url
+        ))
+        .credentials(RequestCredentials::Include)
+        .header(
+            "Authorization",
+            &format!("Bearer {}", token.authorization_value()),
+        )
+        .send()
+        .await
+        .map_err(|_| AssessmentAttemptApiError::NetworkUnavailable)?;
+        if !response.ok() {
+            return Err(map_status(response.status()));
+        }
+        response
+            .binary()
+            .await
+            .map_err(|_| AssessmentAttemptApiError::InternalError)
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -486,10 +638,11 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn stage23c_declares_exact_seven_routes() {
+    fn assessment_client_declares_exact_nine_routes() {
         assert_eq!(
             AssessmentAttemptApiClient::routes(),
             [
+                "/api/v1/account/assessment-history",
                 "/api/v1/account/assessment-assignments",
                 "/api/v1/account/assessment-assignments/{assignment_id}",
                 "/api/v1/account/assessment-assignments/{assignment_id}/attempt",
@@ -497,12 +650,62 @@ mod tests {
                 "/api/v1/account/assessment-attempts/{attempt_id}/draft",
                 "/api/v1/account/assessment-attempts/{attempt_id}/submit",
                 "/api/v1/account/assessment-attempts/{attempt_id}/result",
+                "/api/v1/account/assessment-attempts/{attempt_id}/result.pdf",
             ]
         );
     }
 
     #[wasm_bindgen_test]
+    fn history_query_defaults_to_all_time_and_encodes_bounded_cursor() {
+        assert_eq!(
+            history_list_path(COMPANY_ID, &AssignmentHistoryPeriod::AllTime, Some("page+/="))
+                .unwrap(),
+            format!(
+                "/api/v1/account/assessment-history?company_id={COMPANY_ID}&history_period=all&limit=30&cursor=page%2B%2F%3D"
+            )
+        );
+        assert!(history_list_path(
+            COMPANY_ID,
+            &AssignmentHistoryPeriod::AllTime,
+            Some(&"x".repeat(257))
+        )
+        .is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn history_and_result_dtos_are_strict_and_keep_machine_precision() {
+        let history = format!(
+            r#"{{"items":[{{"attempt_id":"{ATTEMPT_ID}","template_name":"Pilot","template_version":1,"status":"completed","event_at":"2026-08-17T12:00:00Z","local_event_at":"2026-08-17T15:00:00+03:00","local_date":"2026-08-17","day_label":"Сегодня, 17 августа","timezone":"Europe/Moscow","venue_name":null,"subject_name":"Synthetic","score_percent":"87.5000","score_display":"88%","has_result":true,"pdf_available":true}}],"next_cursor":null,"company_timezone":"Europe/Moscow"}}"#
+        );
+        let page: AssessmentHistoryPage = serde_json::from_str(&history).unwrap();
+        assert_eq!(page.items[0].score_percent.as_deref(), Some("87.5000"));
+        assert_eq!(page.items[0].score_display.as_deref(), Some("88%"));
+        assert!(serde_json::from_str::<AssessmentHistoryPage>(
+            &history.replace("\"next_cursor\":null", "\"next_cursor\":null,\"score\":1")
+        )
+        .is_err());
+
+        let result = format!(
+            r#"{{"attempt_id":"{ATTEMPT_ID}","company_id":"{COMPANY_ID}","venue_id":null,"template_name":"Pilot","template_version":1,"status":"completed","venue_name":null,"subject_name":"Synthetic","submitted_at":"2026-08-17T12:00:00Z","local_submitted_at":"2026-08-17T15:00:00+03:00","timezone":"Europe/Moscow","scoring_algorithm":"weighted_v1","score_percent":"87.5000","score_display":"88%","answered_count":1,"required_count":1,"total_count":1,"critical_failure_count":0,"stop_factor_count":0,"sections":[{{"title":"Service","score_percent":"87.5000","score_display":"88%","coverage":"1.000000","critical_failure_count":0,"stop_factor_count":0,"items":[{{"prompt":"Question","answer_type":"boolean","value":"Да","comment":null}}]}}],"related_tasks":[]}}"#
+        );
+        let detail: AssessmentResultDetail = serde_json::from_str(&result).unwrap();
+        assert_eq!(detail.score_percent.as_deref(), Some("87.5000"));
+        assert_eq!(detail.sections[0].score_display.as_deref(), Some("88%"));
+        assert!(
+            serde_json::from_str::<AssessmentResultDetail>(&result.replace(
+                "\"related_tasks\":[]",
+                "\"related_tasks\":[],\"result_json\":{}"
+            ))
+            .is_err()
+        );
+    }
+
+    #[wasm_bindgen_test]
     fn user_journey_assignment_period_query_is_typed_and_bounded() {
+        assert_eq!(
+            assignment_list_path(COMPANY_ID, &AssignmentHistoryPeriod::AllTime).unwrap(),
+            format!("/api/v1/account/assessment-assignments?company_id={COMPANY_ID}")
+        );
         assert_eq!(
             assignment_list_path(COMPANY_ID, &AssignmentHistoryPeriod::Yesterday).unwrap(),
             format!(

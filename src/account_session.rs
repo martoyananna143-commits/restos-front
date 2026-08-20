@@ -94,14 +94,21 @@ impl AccountSessionAdapter {
             };
         }
 
+        let selected_company = match self.state() {
+            AccountSessionState::Authenticated(value) => value.selected_company,
+            _ => None,
+        };
         *self.state.borrow_mut() = AccountSessionState::Refreshing;
-        let result = self.refresh_owner().await;
+        let result = self.refresh_owner(selected_company).await;
         self.refresh_in_flight.set(false);
         result
     }
 
     #[cfg(target_arch = "wasm32")]
-    async fn refresh_owner(&self) -> Result<AccountSessionState, AccountApiError> {
+    async fn refresh_owner(
+        &self,
+        selected_company: Option<SelectedCompanyId>,
+    ) -> Result<AccountSessionState, AccountApiError> {
         let refreshed = match self.api.refresh().await {
             Ok(value) => value,
             Err(AccountApiError::AuthenticationRequired) => {
@@ -130,11 +137,10 @@ impl AccountSessionAdapter {
                 return Err(error);
             }
         };
-        let state = AccountSessionState::Authenticated(authenticated_state(
-            refreshed.access_token,
-            refreshed.expires_at,
-            bootstrap,
-        ));
+        let mut authenticated =
+            authenticated_state(refreshed.access_token, refreshed.expires_at, bootstrap);
+        restore_selected_company(&mut authenticated, selected_company);
+        let state = AccountSessionState::Authenticated(authenticated);
         *self.state.borrow_mut() = state.clone();
         Ok(state)
     }
@@ -217,6 +223,22 @@ fn authenticated_state(
     }
 }
 
+fn restore_selected_company(
+    authenticated: &mut AuthenticatedAccountSession,
+    selected_company: Option<SelectedCompanyId>,
+) {
+    if let Some(selected) = selected_company.filter(|selected| {
+        authenticated
+            .bootstrap
+            .companies
+            .iter()
+            .any(|company| company.company_id == selected.0)
+    }) {
+        authenticated.selected_company = Some(selected);
+        authenticated.company_selection_required = false;
+    }
+}
+
 fn company_selection(companies: &[BootstrapCompany]) -> (Option<SelectedCompanyId>, bool) {
     match companies {
         [company] => (Some(SelectedCompanyId(company.company_id)), false),
@@ -230,6 +252,7 @@ mod tests {
     use super::*;
     use crate::account_api::{BootstrapAccount, BootstrapCompany};
     use uuid::Uuid;
+    use wasm_bindgen_test::wasm_bindgen_test;
 
     fn bootstrap(count: usize) -> AccountBootstrap {
         AccountBootstrap {
@@ -301,6 +324,31 @@ mod tests {
             adapter.state(),
             AccountSessionState::Authenticated(_)
         ));
+    }
+
+    #[wasm_bindgen_test]
+    fn refresh_preserves_only_a_still_authorized_company_selection() {
+        let mut authenticated = authenticated_state(
+            registered(2).access_token,
+            "2030-01-01T00:00:00Z".into(),
+            bootstrap(2),
+        );
+        let selected = SelectedCompanyId(authenticated.bootstrap.companies[1].company_id);
+        restore_selected_company(&mut authenticated, Some(selected));
+        assert_eq!(authenticated.selected_company, Some(selected));
+        assert!(!authenticated.company_selection_required);
+
+        let mut unauthorized = authenticated_state(
+            registered(2).access_token,
+            "2030-01-01T00:00:00Z".into(),
+            bootstrap(2),
+        );
+        restore_selected_company(
+            &mut unauthorized,
+            Some(SelectedCompanyId(Uuid::from_u128(0x9999))),
+        );
+        assert_eq!(unauthorized.selected_company, None);
+        assert!(unauthorized.company_selection_required);
     }
 
     #[test]

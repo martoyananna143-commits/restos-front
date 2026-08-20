@@ -19,9 +19,9 @@ use crate::{
     },
     device_identity::DeviceIdentityAdapter,
     navigation::{
-        active_parent, authorized_target, default_child, navigable_target, resolve_hash, route_for,
-        visible_items, MobilePlacement, NavigationIcon, NavigationId, NavigationProductState,
-        NavigationRole, NavigationZone,
+        active_parent, assessment_result_id, authorized_target, default_child, navigable_target,
+        resolve_hash, route_for, visible_items, MobilePlacement, NavigationIcon, NavigationId,
+        NavigationProductState, NavigationRole, NavigationZone,
     },
     organization_access_api::{OrganizationAccessApiClient, OrganizationAccessProfile},
     passkey::{PasskeyAdapter, PasskeyError},
@@ -35,9 +35,10 @@ use super::{
     },
     bootstrap_owner_capability, capability_from_probe,
     russian_phone_input::{canonical_russian_phone, russian_phone_is_complete, RussianPhoneInput},
-    AssessmentAttemptsPage, AssessmentLibrarySection, AssessmentListView, AssessmentsPage,
-    JoinOrganizationPage, ManagerCapability, MetricsNavigationView, OrganizationSettingsPage,
-    OrganizationSettingsSection, RestaurantMetricsDashboardPage, TeamArea, TeamManagementPage,
+    AssessmentAttemptsPage, AssessmentLibrarySection, AssessmentListView, AssessmentResultPage,
+    AssessmentsPage, JoinOrganizationPage, ManagerCapability, MetricsNavigationView,
+    OrganizationSettingsPage, OrganizationSettingsSection, RestaurantMetricsDashboardPage,
+    TeamArea, TeamManagementPage,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -644,6 +645,27 @@ fn navigate_account(mut active: Signal<NavigationId>, id: NavigationId) {
     }
 }
 
+fn current_assessment_result_id() -> Option<Uuid> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return web_sys::window()
+            .and_then(|window| window.location().hash().ok())
+            .and_then(|hash| assessment_result_id(&hash));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+fn navigate_assessment_result(mut active: Signal<NavigationId>, attempt_id: Uuid) {
+    active.set(NavigationId::AssessmentResult);
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let _ = window
+            .location()
+            .set_hash(&format!("/assessments/results/{attempt_id}"));
+    }
+}
+
 fn role_from_profile(profile: OrganizationAccessProfile) -> NavigationRole {
     match profile {
         OrganizationAccessProfile::Owner => NavigationRole::Owner,
@@ -652,6 +674,22 @@ fn role_from_profile(profile: OrganizationAccessProfile) -> NavigationRole {
         OrganizationAccessProfile::EmployeeUnassigned
         | OrganizationAccessProfile::EmployeeVenue
         | OrganizationAccessProfile::Unsupported => NavigationRole::Employee,
+    }
+}
+
+fn assessment_list_view(id: NavigationId) -> AssessmentListView {
+    match id {
+        NavigationId::AssessmentsHistory => AssessmentListView::History,
+        NavigationId::AssessmentsPlan => AssessmentListView::Planned,
+        _ => AssessmentListView::Active,
+    }
+}
+
+fn assessment_list_key(id: NavigationId) -> &'static str {
+    match id {
+        NavigationId::AssessmentsHistory => "assessments-history",
+        NavigationId::AssessmentsPlan => "assessments-plan",
+        _ => "assessments-active",
     }
 }
 
@@ -933,6 +971,7 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
     };
     let company_session = session.clone();
     if role_result.is_some()
+        && active() != NavigationId::AssessmentResult
         && authorized_target(route_for(active()).unwrap_or("#/today"), navigation_role) != active()
     {
         navigate_account(active, NavigationId::Today);
@@ -946,6 +985,7 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
         navigate_account(active, id);
         navigation_open.set(false);
     });
+    let assessment_route_key = assessment_list_key(active());
 
     rsx! {
         div {
@@ -1072,10 +1112,19 @@ pub fn AccountPilotShell(on_logout: EventHandler<()>) -> Element {
                     },
                     NavigationId::AssessmentsActive | NavigationId::AssessmentsHistory | NavigationId::AssessmentsPlan => rsx! {
                         AssessmentAttemptsPage {
-                            view: match active() { NavigationId::AssessmentsHistory => AssessmentListView::History, NavigationId::AssessmentsPlan => AssessmentListView::Planned, _ => AssessmentListView::Active },
+                            key: "{assessment_route_key}",
+                            view: assessment_list_view(active()),
                             on_measure: move |_| { launched_attempt.set(None); navigate_account(active, NavigationId::Measure); },
                             on_team: move |_| { launched_attempt.set(None); navigate_account(active, NavigationId::TeamTasks); },
+                            on_result: move |attempt_id| { launched_attempt.set(None); navigate_assessment_result(active, attempt_id); },
                             initial_attempt: launched_attempt()
+                        }
+                    },
+                    NavigationId::AssessmentResult => rsx! {
+                        if let Some(attempt_id) = current_assessment_result_id() {
+                            AssessmentResultPage { attempt_id, on_back: move |_| navigate_account(active, NavigationId::AssessmentsHistory) }
+                        } else {
+                            div { class: "account-live account-live--error", role: "alert", "Результат недоступен." }
                         }
                     },
                     NavigationId::Measure => rsx! {
@@ -1300,6 +1349,21 @@ mod tests {
         assert!(escape_handler < sidebar);
         assert!(!shell.contains("if navigation_open() { \"×\" }"));
         assert!(!shell.contains("aria_label: \"Скрыть меню\""));
+    }
+
+    #[wasm_bindgen_test]
+    fn assessment_list_routes_have_distinct_component_lifecycle_keys() {
+        let active = assessment_list_key(NavigationId::AssessmentsActive);
+        let history = assessment_list_key(NavigationId::AssessmentsHistory);
+        let planned = assessment_list_key(NavigationId::AssessmentsPlan);
+
+        assert_ne!(active, history);
+        assert_ne!(history, planned);
+        assert_ne!(active, planned);
+        assert_eq!(
+            assessment_list_view(NavigationId::AssessmentsHistory),
+            AssessmentListView::History
+        );
     }
 
     #[wasm_bindgen_test]

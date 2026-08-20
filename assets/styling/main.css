@@ -37,10 +37,11 @@
 }
 
 /* Stage 23C: employee assessment attempts. */
-.attempt-page, .attempt-editor { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; }
+.attempt-page, .attempt-editor { width: min(100%, 1120px); max-width: 1120px; min-width: 0; margin: 0 auto; padding: 28px 20px 56px; }
 .attempt-hero, .attempt-editor-header { margin-bottom: 24px; }
 .attempt-assignment-list { display: grid; gap: 16px; }
 .attempt-assignment-card { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 20px; border: 1px solid var(--border, #ddd7cf); border-radius: 18px; background: #fff; }
+.attempt-assignment-card > :first-child { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
 .attempt-assignment-card small { display: block; margin-top: 5px; color: #655f58; }
 .attempt-editor-layout { display: grid; grid-template-columns: minmax(11rem, 15rem) minmax(0, 1fr); gap: 20px; align-items: start; }
 .attempt-section-nav { position: sticky; top: 88px; display: grid; gap: 10px; padding: 4px 0 16px; }
@@ -82,8 +83,57 @@
 .attempt-conflict, .attempt-result, .attempt-confirm { margin-top: 20px; padding: 18px; border: 1px solid #c8bda9; border-radius: 16px; background: #fffaf0; }
 .attempt-section-results { display:grid; gap:6px; margin:12px 0 0; padding-left:20px; }
 .attempt-result-actions { display: grid; gap: 10px; margin-top: 18px; }
+.assessment-history-day { display: grid; gap: 12px; margin-block: 18px 26px; }
+.assessment-history-day > h3 { margin: 0; font-size: 1.05rem; }
+.assessment-history-card[role="button"] { cursor: pointer; outline: none; }
+.assessment-history-card[role="button"]:focus-visible { box-shadow: 0 0 0 3px var(--focus-ring, #275b35); }
+.assessment-history-card__actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex: 0 1 auto; flex-wrap: wrap; }
+.assessment-history-score, .assessment-result-score { color: var(--green, #275b35); font-size: clamp(1.5rem, 4vw, 2.4rem); font-variant-numeric: tabular-nums; }
+.assessment-history-pdf, .assessment-history-more, .assessment-result-back { min-height: 44px; }
+.assessment-result-page { width: min(70rem, calc(100% - 2rem)); margin-inline: auto; }
+.attempt-result-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px; border: 1px solid var(--border, #ddd7cf); border-radius: 20px; background: #fff; }
+.assessment-result-section { margin-top: 20px; padding: 20px; border: 1px solid var(--border, #ddd7cf); border-radius: 18px; background: #fff; }
+.assessment-result-section > header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.assessment-result-answers { display: grid; gap: 12px; margin-top: 14px; }
+.assessment-result-answer { padding: 14px; border: 1px solid var(--border, #ddd7cf); border-radius: 14px; overflow-wrap: anywhere; }
+.assessment-result-answer h3, .assessment-result-answer p { margin: 0; }
+.assessment-result-answer__value { margin-top: 8px !important; font-weight: 700; }
+.assessment-result-answer__comment { margin-top: 8px !important; color: var(--text2, #655f58); }
 .attempt-confirm[role="dialog"] { position: fixed; z-index: 40; inset: 50% auto auto 50%; width: min(420px, calc(100vw - 32px)); transform: translate(-50%, -50%); box-shadow: 0 24px 80px rgb(0 0 0 / 24%); }
-@media (max-width: 720px) { .attempt-page, .attempt-editor { padding: 20px 14px 44px; } .attempt-assignment-card { align-items: stretch; flex-direction: column; } .attempt-assignment-card button { width: 100%; } .attempt-editor-layout { grid-template-columns: 1fr; } .attempt-section-nav { position: sticky; top: 72px; z-index: 4; max-height: min(38dvh, 19rem); overflow-y: auto; overscroll-behavior: contain; padding: 8px; border-radius: 14px; background: rgba(245,243,237,.96); box-shadow: 0 10px 26px rgba(38,55,47,.12); } .attempt-section-order-actions { grid-template-columns: repeat(3, 36px); } .attempt-section-order-actions button { min-width: 36px; } .attempt-sections { max-height: calc(100dvh - 260px); } .attempt-boolean-actions { grid-template-columns: 1fr 1fr; } .attempt-boolean-actions button:last-child { grid-column: 1 / -1; } }
+@media (max-width: 720px) {
+  .attempt-page, .attempt-editor { width: 100%; padding: 20px 14px calc(7rem + env(safe-area-inset-bottom)); }
+  .attempt-assignment-card { width: 100%; min-width: 0; align-items: stretch; flex-direction: column; }
+  .attempt-assignment-card button { width: 100%; max-width: 100%; }
+  .assessment-history-card__actions { width: 100%; align-items: stretch; flex-direction: column; }
+  .assessment-result-page { width: 100%; }
+  .attempt-result-header, .assessment-result-section > header { align-items: flex-start; flex-direction: column; }
+  .attempt-editor-layout { grid-template-columns: minmax(0, 1fr); }
+  .attempt-section-nav {
+    position: sticky;
+    top: max(0px, env(safe-area-inset-top));
+    z-index: 4;
+    max-width: 100%;
+    max-height: none;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-inline: contain;
+    padding: 8px;
+    border-radius: 14px;
+    background: rgba(245,243,237,.96);
+    box-shadow: 0 10px 26px rgba(38,55,47,.12);
+    scrollbar-width: thin;
+  }
+  .attempt-section-nav-item { min-width: min(16rem, calc(100vw - 3.5rem)); flex: 0 0 auto; }
+  .attempt-section-order-actions { grid-template-columns: repeat(3, 36px); }
+  .attempt-section-order-actions button { min-width: 36px; }
+  .attempt-sections { max-height: none; overflow: visible; scroll-snap-type: none; padding: 4px 0 32px; }
+  .attempt-save-status { position: static; margin-left: 0; }
+  .attempt-stopwatch { position: relative; bottom: auto; margin-bottom: 1rem; }
+  .attempt-boolean-actions { grid-template-columns: 1fr 1fr; }
+  .attempt-boolean-actions button:last-child { grid-column: 1 / -1; }
+}
 @media (prefers-reduced-motion: reduce) { .attempt-page *, .attempt-editor * { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }
 
 html {

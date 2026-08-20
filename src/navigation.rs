@@ -1,6 +1,7 @@
 //! Account navigation source of truth shared by desktop, mobile and route handling.
 
 use dioxus::prelude::*;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NavigationId {
@@ -9,6 +10,7 @@ pub enum NavigationId {
     AssessmentsActive,
     AssessmentsHistory,
     AssessmentsPlan,
+    AssessmentResult,
     Templates,
     TemplateLibrary,
     CompanyTemplates,
@@ -169,7 +171,7 @@ const fn item(
     }
 }
 
-pub const NAVIGATION_REGISTRY: [NavigationItem; 27] = [
+pub const NAVIGATION_REGISTRY: [NavigationItem; 28] = [
     item(
         NavigationId::Today,
         Some("#/today"),
@@ -238,6 +240,20 @@ pub const NAVIGATION_REGISTRY: [NavigationItem; 27] = [
         NavigationProductState::ComingSoon,
         MobilePlacement::More,
         NavigationZone::Main,
+        None,
+    ),
+    item(
+        NavigationId::AssessmentResult,
+        None,
+        Some(NavigationId::Assessments),
+        "Результат оценки",
+        NavigationIconId::History,
+        24,
+        NavigationCapability::Authenticated,
+        NavigationKind::Subpage,
+        NavigationProductState::Active,
+        MobilePlacement::More,
+        NavigationZone::Hidden,
         None,
     ),
     item(
@@ -610,10 +626,21 @@ pub fn resolve_hash(hash: &str) -> Option<NavigationId> {
     if hash.starts_with("#token=") {
         return Some(NavigationId::JoinOrganization);
     }
+    if assessment_result_id(hash).is_some() {
+        return Some(NavigationId::AssessmentResult);
+    }
     let matched = NAVIGATION_REGISTRY
         .iter()
         .find(|item| item.route == Some(hash))?;
     default_child(matched.id).or(Some(matched.id))
+}
+
+pub fn assessment_result_id(hash: &str) -> Option<Uuid> {
+    let value = hash.strip_prefix("#/assessments/results/")?;
+    if value.contains('/') || value.contains('?') || value.contains('#') {
+        return None;
+    }
+    Uuid::parse_str(value).ok()
 }
 
 pub fn active_parent(id: NavigationId) -> NavigationId {
@@ -683,14 +710,14 @@ mod tests {
         assert_eq!(ids.len(), NAVIGATION_REGISTRY.len());
         let routes = NAVIGATION_REGISTRY
             .iter()
-            .filter(|item| item.kind != NavigationKind::Action)
+            .filter(|item| item.kind != NavigationKind::Action && item.route.is_some())
             .map(|item| item.route.expect("pages and subpages have routes"))
             .collect::<HashSet<_>>();
         assert_eq!(
             routes.len(),
             NAVIGATION_REGISTRY
                 .iter()
-                .filter(|item| item.kind != NavigationKind::Action)
+                .filter(|item| item.kind != NavigationKind::Action && item.route.is_some())
                 .count()
         );
     }
@@ -787,6 +814,18 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn deep_links_and_invitation_hash_are_exact() {
+        let attempt_id = Uuid::from_u128(42);
+        let result_hash = format!("#/assessments/results/{attempt_id}");
+        assert_eq!(
+            resolve_hash(&result_hash),
+            Some(NavigationId::AssessmentResult)
+        );
+        assert_eq!(assessment_result_id(&result_hash), Some(attempt_id));
+        assert_eq!(
+            assessment_result_id("#/assessments/results/not-a-uuid"),
+            None
+        );
+        assert_eq!(assessment_result_id(&format!("{result_hash}/extra")), None);
         assert_eq!(
             resolve_hash("#/analytics/sources"),
             Some(NavigationId::AnalyticsSources)
@@ -827,7 +866,7 @@ mod tests {
     fn every_subpage_has_an_exact_independent_route() {
         for item in NAVIGATION_REGISTRY
             .iter()
-            .filter(|item| item.kind == NavigationKind::Subpage)
+            .filter(|item| item.kind == NavigationKind::Subpage && item.route.is_some())
         {
             let route = item.route.expect("subpage route");
             assert_eq!(resolve_hash(route), Some(item.id));

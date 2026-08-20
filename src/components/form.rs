@@ -4,6 +4,7 @@
 //! Phase 3 (Success): result card with score breakdown.
 
 use crate::api;
+use crate::presentation_percent::format_percent_number;
 use crate::types::{
     Answer, AnswerValue, Criterion, CriterionSetOption, Employee, EvaluationTypeOption,
     StartEvaluationRequest, SubmitRequest,
@@ -705,6 +706,7 @@ fn FillPhase(
         "rgba(245,166,35,0.9)"
     };
     let ring_offset = circumference * (1.0 - preview_pct / 100.0);
+    let preview_label = format_percent_number(preview_pct).unwrap_or_else(|| "—".into());
 
     let tok = token.clone();
     let ename = employee_name.clone();
@@ -907,14 +909,14 @@ fn FillPhase(
                                 font_size: "12", font_weight: "500",
                                 fill: "{ring_text_color}",
                                 font_family: "DM Sans, sans-serif",
-                                "{preview_pct:.0}%"
+                                "{preview_label}"
                             }
                         }
                         div { style: "flex:1;",
                             if all_done {
                                 div { style: "font-size:13px; font-weight:500;",
                                     "Итоговый балл: "
-                                    span { style: "color:var(--green);", "{preview_pct:.1}%" }
+                                    span { style: "color:var(--green);", "{preview_label}" }
                                 }
                                 div { style: "font-size:12px; color:var(--text3); margin-top:2px;",
                                     "Все {total} критериев заполнены"
@@ -1277,6 +1279,7 @@ fn SuccessScreen(
     } else {
         "var(--red)"
     };
+    let score_label = format_percent_number(score).unwrap_or_else(|| "—".into());
 
     // Build date string
     let date_str = {
@@ -1325,7 +1328,7 @@ fn SuccessScreen(
                     div { style: "padding-top:12px; display:flex; flex-direction:column; gap:9px;",
                         div { class: "result-row",
                             span { class: "result-label", "Итоговый балл" }
-                            span { class: "result-score", style: "color:{score_color};", "{score:.1}%" }
+                            span { class: "result-score", style: "color:{score_color};", "{score_label}" }
                         }
                         div { class: "result-row",
                             span { class: "result-label", "Набор критериев" }
