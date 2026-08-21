@@ -40,6 +40,8 @@ pub struct ManagementEmployee {
     pub display_name: String,
     pub position_title: Option<String>,
     pub status: String,
+    pub venue_ids: Vec<Uuid>,
+    pub venue_required: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -184,15 +186,7 @@ impl AssessmentManagementApiClient {
         limit: usize,
         after: Option<Uuid>,
     ) -> Result<Vec<ManagementEmployee>, AssessmentManagementApiError> {
-        let mut query = format!("?limit={}", limit.clamp(1, 100));
-        if let Some(value) = q.map(str::trim).filter(|value| !value.is_empty()) {
-            query.push_str("&q=");
-            query.push_str(&urlencoding::encode(value));
-        }
-        if let Some(value) = after {
-            query.push_str("&after=");
-            query.push_str(&value.to_string());
-        }
+        let query = employee_query(q, limit, after);
         self.get(
             &format!(
                 "/api/v1/account/companies/{company_id}/assessment-management/employees{query}"
@@ -352,6 +346,19 @@ impl AssessmentManagementApiClient {
     }
 }
 
+fn employee_query(q: Option<&str>, limit: usize, after: Option<Uuid>) -> String {
+    let mut query = format!("?limit={}&include_venue_ids=true", limit.clamp(1, 100));
+    if let Some(value) = q.map(str::trim).filter(|value| !value.is_empty()) {
+        query.push_str("&q=");
+        query.push_str(&urlencoding::encode(value));
+    }
+    if let Some(value) = after {
+        query.push_str("&after=");
+        query.push_str(&value.to_string());
+    }
+    query
+}
+
 impl AssignmentStatus {
     pub const fn as_wire(self) -> &'static str {
         match self {
@@ -435,9 +442,10 @@ mod tests {
         assert_eq!(assignment.due_at, None);
         assert_eq!(assignment.progress.completion, None);
         let employee = format!(
-            r#"{{"employee_profile_id":"{EMPLOYEE}","display_name":"Сотрудник","position_title":null,"status":"active"}}"#
+            r#"{{"employee_profile_id":"{EMPLOYEE}","display_name":"Сотрудник","position_title":null,"status":"active","venue_ids":["{ASSIGNMENT}"],"venue_required":false}}"#
         );
-        assert!(serde_json::from_str::<ManagementEmployee>(&employee).is_ok());
+        let employee = serde_json::from_str::<ManagementEmployee>(&employee).unwrap();
+        assert_eq!(employee.venue_ids, vec![ASSIGNMENT]);
         let template = format!(
             r#"{{"template_id":"{TEMPLATE}","template_version_id":"{VERSION}","name":"Проверка","activity_type":"evaluation","version":1,"published_at":"2026-08-08T00:00:00Z"}}"#
         );
@@ -507,5 +515,13 @@ mod tests {
             map_error(500, None),
             AssessmentManagementApiError::InternalError
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn measurement_employee_query_explicitly_requests_venue_compatibility() {
+        let query = employee_query(Some(" Сотрудник "), 500, Some(EMPLOYEE));
+        assert!(query.starts_with("?limit=100&include_venue_ids=true"));
+        assert!(query.contains("&q=%D0%A1%D0%BE%D1%82%D1%80%D1%83%D0%B4%D0%BD%D0%B8%D0%BA"));
+        assert!(query.ends_with(&format!("&after={EMPLOYEE}")));
     }
 }
