@@ -253,6 +253,18 @@ pub fn OrganizationSettingsPage(
 
             match section {
                 OrganizationSettingsSection::Employees => rsx! {
+                    article { class: "journey-panel organization-invitation-modes", aria_label: "Способы приглашения сотрудников",
+                        h2 { "Приглашения" }
+                        div { class: "journey-action-grid",
+                            a { class: "btn-primary", href: "#workforce-title", "Пригласить одного сотрудника" }
+                            button {
+                                class: "btn-secondary", r#type: "button", disabled: true,
+                                aria_disabled: "true",
+                                "Групповое приглашение временно недоступно"
+                            }
+                        }
+                        p { class: "journey-muted", "Групповое приглашение откроется только после публикации обновлённых правовых документов." }
+                    }
                     WorkforceOnboardingPage {}
                     article { class: "journey-panel organization-access-panel",
                         h2 { "Профили и доступ" }
@@ -269,7 +281,9 @@ pub fn OrganizationSettingsPage(
                         p { class: "journey-muted", "Организация → профиль доступа → рестораны. Кадровая подчинённость не создаётся." }
                         AccessStructure { employees: employees(), venues: venues() }
                     }
-                    PendingRegistrationList { pending: pending(), on_reload: move |_| reload += 1 }
+                    if GROUP_ONBOARDING_DOB_LEGAL_PUBLISHED {
+                        PendingRegistrationList { pending: pending(), on_reload: move |_| reload += 1 }
+                    }
                 },
                 OrganizationSettingsSection::Venues => rsx! {
                     article { class: "journey-panel",
@@ -303,8 +317,13 @@ pub fn OrganizationSettingsPage(
                             GroupInvitationList { invitations: invitations(), on_reload: move |_| reload += 1 }
                         } else {
                             div { class: "journey-empty", role: "status",
-                                strong { "Временно недоступно" }
-                                p { "Групповые приглашения будут включены после публикации обновлённых правовых документов." }
+                                strong { "Групповое приглашение временно недоступно" }
+                                p { "Групповые приглашения будут включены только после публикации обновлённых правовых документов." }
+                                button {
+                                    class: "btn-primary", r#type: "button",
+                                    onclick: move |_| on_section_change.call(OrganizationSettingsSection::Employees),
+                                    "Пригласить одного сотрудника"
+                                }
                             }
                         }
                     }
@@ -953,6 +972,8 @@ mod tests {
         assert!(!production.contains("hard_delete"));
         assert!(!production.contains("руководитель → подчинённый"));
         assert!(!GROUP_ONBOARDING_DOB_LEGAL_PUBLISHED);
-        assert!(production.contains("Временно недоступно"));
+        assert!(production.contains("Пригласить одного сотрудника"));
+        assert!(production.contains("Групповое приглашение временно недоступно"));
+        assert!(production.contains("if GROUP_ONBOARDING_DOB_LEGAL_PUBLISHED"));
     }
 }

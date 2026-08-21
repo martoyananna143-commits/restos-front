@@ -35,7 +35,9 @@ fn safe_workforce_error(error: &WorkforceApiError) -> &'static str {
         WorkforceApiError::InvalidRequest => {
             "Проверьте имя, номер телефона сотрудника и выбранный объект."
         }
-        WorkforceApiError::Conflict => "Приглашение изменилось. Создайте новое приглашение.",
+        WorkforceApiError::Conflict => {
+            "Не удалось создать отдельное приглашение. Проверьте список сотрудников и ожидающие приглашения."
+        }
         WorkforceApiError::NetworkUnavailable => {
             "Нет связи с сервером. Повторите действие вручную."
         }
@@ -106,7 +108,7 @@ pub fn WorkforceOnboardingPage() -> Element {
             header { class: "management-hero",
                 div {
                     p { class: "management-eyebrow", "RESTOS • КОМАНДА" }
-                    h1 { id: "workforce-title", "Пригласить сотрудника" }
+                    h1 { id: "workforce-title", "Пригласить одного сотрудника" }
                     p { "Создайте одноразовый код и передайте его сотруднику безопасным способом." }
                 }
             }
@@ -327,5 +329,15 @@ mod tests {
             assert!(!message.contains("существует"));
             assert!(!message.contains("телефон"));
         }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn individual_invitation_is_named_separately_from_group_onboarding() {
+        let source = include_str!("workforce_onboarding.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(production.contains("Пригласить одного сотрудника"));
+        assert!(!production.contains("date_of_birth"));
+        assert!(!production.contains("birth_date"));
     }
 }
