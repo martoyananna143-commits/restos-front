@@ -288,8 +288,14 @@ if (!window.__restosErrorGuardsInstalled) {
             "
 if ('serviceWorker' in navigator) {{
   const registerServiceWorker = function() {{
-    navigator.serviceWorker.register('/sw.js', {{ scope: '/' }})
-      .then(function(reg) {{ console.log('[PWA] SW registered, scope:', reg.scope); }})
+    navigator.serviceWorker.register('/sw.js', {{ scope: '/', updateViaCache: 'none' }})
+      .then(function(reg) {{
+        if (reg.active) {{
+          reg.update().catch(function() {{
+            console.warn('[PWA] Service worker update check unavailable.');
+          }});
+        }}
+      }})
       .catch(function() {{ console.warn('[PWA] Service worker registration unavailable.'); }});
   }};
   if (document.readyState === 'loading') {{
@@ -689,6 +695,7 @@ fn MainApp(
 #[cfg(test)]
 mod service_worker_script_tests {
     const APP_SOURCE: &str = include_str!("main.rs");
+    const SERVICE_WORKER_SOURCE: &str = include_str!("../public/sw.js");
 
     fn service_worker_script_source() -> &'static str {
         APP_SOURCE
@@ -715,10 +722,16 @@ mod service_worker_script_tests {
         assert!(source.contains("if ('serviceWorker' in navigator)"));
         assert!(source.contains("navigator.serviceWorker.register('/sw.js'"));
         assert!(source.contains("scope: '/'"));
+        assert!(source.contains("updateViaCache: 'none'"));
+        assert!(source.contains("reg.update()"));
+        assert_eq!(source.matches("reg.update()").count(), 1);
         assert!(source.contains("document.readyState === 'loading'"));
         assert!(source.contains("once: true"));
         assert!(source.contains("registerServiceWorker();"));
         assert!(source.contains(".catch(function()"));
+        assert!(!source.contains("setInterval"));
+        assert!(!source.contains("location.reload"));
+        assert!(!source.contains("controllerchange"));
         assert!(!source.contains("throw "));
     }
 
@@ -744,5 +757,40 @@ mod service_worker_script_tests {
                 "forbidden script material: {forbidden}"
             );
         }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn service_worker_template_is_release_bound_and_fail_closed() {
+        assert_eq!(
+            SERVICE_WORKER_SOURCE
+                .matches("__RESTOS_RELEASE_ID__")
+                .count(),
+            1
+        );
+        assert!(SERVICE_WORKER_SOURCE.contains("RELEASE_ID_PATTERN"));
+        assert!(SERVICE_WORKER_SOURCE.contains("throw new Error"));
+        assert!(!SERVICE_WORKER_SOURCE.contains("brand-experience-stage2-v1"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn service_worker_uses_compatible_release_fetch_strategies() {
+        assert!(SERVICE_WORKER_SOURCE.contains("url.pathname.startsWith(\"/api/\")"));
+        assert!(SERVICE_WORKER_SOURCE.contains("event.respondWith(fetch(request))"));
+        assert!(SERVICE_WORKER_SOURCE.contains("request.mode === \"navigate\""));
+        assert!(SERVICE_WORKER_SOURCE.contains("networkFirstShell(request)"));
+        assert!(SERVICE_WORKER_SOURCE.contains("cache: \"no-store\""));
+        assert!(SERVICE_WORKER_SOURCE.contains("cacheFirst(request, STATIC_CACHE)"));
+        assert!(!SERVICE_WORKER_SOURCE.contains("staleWhileRevalidate"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn service_worker_only_removes_versioned_restos_caches() {
+        assert!(SERVICE_WORKER_SOURCE.contains("RESTOS_CACHE_PREFIXES"));
+        assert!(SERVICE_WORKER_SOURCE.contains("key.startsWith(prefix)"));
+        assert!(SERVICE_WORKER_SOURCE.contains("!CURRENT_CACHES.includes(key)"));
+        assert!(!SERVICE_WORKER_SOURCE.contains("keys.filter((k) => !"));
     }
 }

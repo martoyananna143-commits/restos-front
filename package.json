@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "build:release": "python3 scripts/build_release.py",
+    "test:service-worker": "python3 -m unittest tests.test_service_worker_release"
+  },
   "dependencies": {
     "tailwindcss": "^4.2.2"
   }

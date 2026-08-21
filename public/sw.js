@@ -1,104 +1,133 @@
 /**
- * Restos PWA — Service Worker
+ * RestOS PWA service worker.
  *
- * Strategy:
- *  - App shell (HTML, WASM, JS, CSS): Cache-first with network fallback + background revalidation (stale-while-revalidate).
- *  - API calls (/api/*): Network-first, no caching — always fresh.
- *  - Static assets (/icons/*, /assets/*): Cache-first, long TTL.
- *
- * On activation the old caches are cleaned up so storage doesn't grow unbounded.
+ * The release builder replaces the placeholder below with the SHA-256 release
+ * identifier derived from the emitted HTML/JS/WASM/CSS artifact manifest.
  */
 
-const APP_VERSION = "brand-experience-stage2-v1";
+const APP_VERSION = "__RESTOS_RELEASE_ID__";
+const RELEASE_ID_PATTERN = /^[a-f0-9]{64}$/;
+
+if (!RELEASE_ID_PATTERN.test(APP_VERSION)) {
+  throw new Error("RestOS service worker release ID is unavailable");
+}
+
 const SHELL_CACHE = `restos-shell-${APP_VERSION}`;
 const STATIC_CACHE = `restos-static-${APP_VERSION}`;
-const ALL_CACHES = [SHELL_CACHE, STATIC_CACHE];
+const CURRENT_CACHES = [SHELL_CACHE, STATIC_CACHE];
+const RESTOS_CACHE_PREFIXES = ["restos-shell-", "restos-static-"];
+const SHELL_URLS = ["/", "/index.html"];
 
-// Resources to pre-cache on install (app shell)
-const SHELL_URLS = [
-  "/",
-  "/index.html",
-];
-
-// ── Install ─────────────────────────────────────────────────────────────────
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches
-      .open(SHELL_CACHE)
-      .then((cache) => cache.addAll(SHELL_URLS))
-      .then(() => self.skipWaiting())
+    (async () => {
+      const cache = await caches.open(SHELL_CACHE);
+      for (const path of SHELL_URLS) {
+        const response = await fetch(new Request(path, { cache: "reload" }));
+        if (!response.ok) {
+          throw new Error("RestOS shell installation failed");
+        }
+        await cache.put(path, response.clone());
+      }
+      await self.skipWaiting();
+    })()
   );
 });
 
-// ── Activate ─────────────────────────────────────────────────────────────────
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((keys) =>
-        Promise.all(
-          keys
-            .filter((k) => !ALL_CACHES.includes(k))
-            .map((k) => caches.delete(k))
-        )
-      )
-      .then(() => self.clients.claim())
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(
+        keys
+          .filter(
+            (key) =>
+              RESTOS_CACHE_PREFIXES.some((prefix) => key.startsWith(prefix)) &&
+              !CURRENT_CACHES.includes(key)
+          )
+          .map((key) => caches.delete(key))
+      );
+      await self.clients.claim();
+    })()
   );
 });
 
-// ── Fetch ────────────────────────────────────────────────────────────────────
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Skip non-GET and cross-origin requests
   if (request.method !== "GET" || url.origin !== self.location.origin) {
     return;
   }
 
-  // API calls — always go to network, never cache
   if (url.pathname.startsWith("/api/")) {
     event.respondWith(fetch(request));
     return;
   }
 
-  // Static assets — cache-first
-  if (
-    url.pathname.startsWith("/assets/") ||
-    url.pathname.startsWith("/icons/")
-  ) {
-    event.respondWith(cacheFirst(request, STATIC_CACHE));
+  if (url.pathname === "/sw.js") {
+    event.respondWith(fetch(request, { cache: "no-store" }));
     return;
   }
 
-  // Everything else (HTML, WASM, JS) — stale-while-revalidate
-  event.respondWith(staleWhileRevalidate(request, SHELL_CACHE));
+  if (
+    request.mode === "navigate" ||
+    url.pathname === "/" ||
+    url.pathname === "/index.html"
+  ) {
+    event.respondWith(networkFirstShell(request));
+    return;
+  }
+
+  if (
+    url.pathname.startsWith("/assets/") ||
+    url.pathname.startsWith("/icons/") ||
+    url.pathname.startsWith("/brand/") ||
+    url.pathname.startsWith("/favicon")
+  ) {
+    event.respondWith(cacheFirst(request, STATIC_CACHE));
+  }
 });
 
-// ── Strategies ───────────────────────────────────────────────────────────────
+async function networkFirstShell(request) {
+  const cache = await caches.open(SHELL_CACHE);
+  try {
+    const response = await fetch(request, { cache: "no-store" });
+    if (response.ok) {
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch (_error) {
+    const cached =
+      (await cache.match(request, { ignoreSearch: true })) ||
+      (await cache.match("/index.html")) ||
+      (await cache.match("/"));
+    return cached || controlledOfflineResponse();
+  }
+}
 
 async function cacheFirst(request, cacheName) {
-  const cached = await caches.match(request);
-  if (cached) return cached;
+  const cache = await caches.open(cacheName);
+  const cached = await cache.match(request);
+  if (cached) {
+    return cached;
+  }
   const response = await fetch(request);
   if (response.ok) {
-    const cache = await caches.open(cacheName);
-    cache.put(request, response.clone());
+    await cache.put(request, response.clone());
   }
   return response;
 }
 
-async function staleWhileRevalidate(request, cacheName) {
-  const cache = await caches.open(cacheName);
-  const cached = await cache.match(request);
-
-  const networkFetch = fetch(request).then((response) => {
-    if (response.ok) {
-      cache.put(request, response.clone());
+function controlledOfflineResponse() {
+  return new Response(
+    "<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>RestOS — нет связи</title><main><h1>Нет связи с RestOS</h1><p>Проверьте интернет-соединение и обновите страницу.</p></main></html>",
+    {
+      status: 503,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
     }
-    return response;
-  }).catch(() => null);
-
-  // Return cached immediately, but refresh in background
-  return cached || networkFetch;
+  );
 }

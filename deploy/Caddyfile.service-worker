@@ -1,0 +1,13 @@
+# Import these directives inside the pilot.restos.space site block.
+
+@restos_service_worker path /sw.js
+header @restos_service_worker {
+    Cache-Control "no-cache, no-store, must-revalidate"
+    Service-Worker-Allowed "/"
+}
+
+@restos_shell path / /index.html
+header @restos_shell Cache-Control "no-cache, must-revalidate"
+
+@restos_fingerprinted_assets path_regexp restos_fingerprint ^/assets/.+-dxh[0-9a-f]+\.(?:js|wasm|css)$
+header @restos_fingerprinted_assets Cache-Control "public, max-age=31536000, immutable"
