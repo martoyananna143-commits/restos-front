@@ -27,12 +27,22 @@ pub struct WorkforceVenue {
     pub name: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkforcePosition {
+    pub position_id: Uuid,
+    pub position_name: String,
+    pub access_profile_name: String,
+    pub access_scope: String,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CreateWorkforceInvitationRequest {
     pub request_id: Uuid,
     pub employee_name: String,
     pub phone: String,
+    pub position_id: Uuid,
     pub venue_id: Option<Uuid>,
 }
 
@@ -42,7 +52,9 @@ pub struct WorkforceInvitationResponse {
     pub created: bool,
     pub invitation_id: Uuid,
     pub employee_profile_id: Uuid,
-    pub invitation_code: String,
+    pub delivery_status: String,
+    pub invitation_status: String,
+    pub masked_phone: String,
     pub expires_at: String,
 }
 
@@ -56,6 +68,16 @@ pub struct AcceptWorkforceInvitationRequest {
 #[serde(deny_unknown_fields)]
 pub struct AcceptWorkforceInvitationResponse {
     pub joined: bool,
+    pub company_name: String,
+    pub position_name: String,
+    pub venue_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkforceInvitationStatusResponse {
+    pub invitation_status: String,
+    pub delivery_status: String,
 }
 
 #[derive(Deserialize)]
@@ -83,10 +105,12 @@ impl WorkforceApiClient {
     }
 
     #[allow(dead_code)]
-    pub const fn routes() -> [&'static str; 3] {
+    pub const fn routes() -> [&'static str; 5] {
         [
             "/api/v1/account/companies/{company_id}/workforce/venues",
+            "/api/v1/account/companies/{company_id}/workforce/positions",
             "/api/v1/account/companies/{company_id}/workforce/invitations",
+            "/api/v1/account/companies/{company_id}/workforce/invitations/{invitation_id}/status",
             "/api/v1/account/workforce/invitations/accept",
         ]
     }
@@ -124,6 +148,19 @@ impl WorkforceApiClient {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub async fn positions(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+    ) -> Result<Vec<WorkforcePosition>, WorkforceApiError> {
+        self.get(
+            &format!("/api/v1/account/companies/{company_id}/workforce/positions"),
+            token,
+        )
+        .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub async fn create_invitation(
         &self,
         token: &AccountAccessToken,
@@ -141,6 +178,22 @@ impl WorkforceApiClient {
             .json(body)
             .map_err(|_| WorkforceApiError::InvalidRequest)?;
         self.decode(request.send().await).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn invitation_status(
+        &self,
+        token: &AccountAccessToken,
+        company_id: Uuid,
+        invitation_id: Uuid,
+    ) -> Result<WorkforceInvitationStatusResponse, WorkforceApiError> {
+        self.get(
+            &format!(
+                "/api/v1/account/companies/{company_id}/workforce/invitations/{invitation_id}/status"
+            ),
+            token,
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -243,16 +296,22 @@ const record = (body) => {{
   let payload;
   if ({status} === 401) {{
     payload = JSON.stringify({{detail: {{code: "authentication_required", private: "must-not-escape"}}}});
+  }} else if (request.url.endsWith("/status")) {{
+    payload = JSON.stringify({{invitation_status: "accepted", delivery_status: "sent"}});
+  }} else if (request.url.endsWith("/positions")) {{
+    payload = JSON.stringify([{{position_id: "00000000-0000-0000-0000-000000000009", position_name: "Synthetic Position", access_profile_name: "Synthetic Access", access_scope: "working_venues"}}]);
   }} else if (request.method === "GET") {{
     payload = JSON.stringify([{{venue_id: "00000000-0000-0000-0000-000000000002", name: "Synthetic Venue"}}]);
   }} else if (request.url.endsWith("/accept")) {{
-    payload = JSON.stringify({{joined: true}});
+    payload = JSON.stringify({{joined: true, company_name: "Synthetic Company", position_name: "Synthetic Position", venue_names: ["Synthetic Venue"]}});
   }} else {{
     payload = JSON.stringify({{
       created: true,
       invitation_id: "00000000-0000-0000-0000-000000000003",
       employee_profile_id: "00000000-0000-0000-0000-000000000004",
-      invitation_code: "123456",
+      delivery_status: "sent",
+      invitation_status: "pending",
+      masked_phone: "+7 ••• •••-45-67",
       expires_at: "2026-08-17T12:00:00Z"
     }});
   }}
@@ -293,7 +352,7 @@ return request.method === "GET"
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn routes_are_exact_and_account_only() {
         let routes = WorkforceApiClient::routes();
-        assert_eq!(routes.len(), 3);
+        assert_eq!(routes.len(), 5);
         assert!(routes
             .iter()
             .all(|path| path.starts_with("/api/v1/account/")));
@@ -307,6 +366,7 @@ return request.method === "GET"
             request_id: Uuid::from_u128(1),
             employee_name: "Synthetic Employee".into(),
             phone: "+79991234567".into(),
+            position_id: Uuid::from_u128(9),
             venue_id: None,
         };
         let serialized = serde_json::to_string(&request).unwrap();
@@ -333,6 +393,7 @@ return request.method === "GET"
                     request_id: Uuid::from_u128(5),
                     employee_name: "Synthetic Employee".into(),
                     phone: "+79991234567".into(),
+                    position_id: Uuid::from_u128(9),
                     venue_id: Some(Uuid::from_u128(2)),
                 },
             )
@@ -349,7 +410,10 @@ return request.method === "GET"
         drop(guard);
 
         assert_eq!(venues.unwrap().len(), 1);
-        assert!(invitation.unwrap().created);
+        let invitation = invitation.unwrap();
+        assert!(invitation.created);
+        assert_eq!(invitation.delivery_status, "sent");
+        assert_eq!(invitation.masked_phone, "+7 ••• •••-45-67");
         assert!(joined.unwrap().joined);
         let requests = evidence.as_array().unwrap();
         assert_eq!(requests.len(), 3);

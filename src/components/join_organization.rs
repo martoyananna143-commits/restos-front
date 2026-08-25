@@ -10,7 +10,10 @@ use crate::{
         JoinGroupInvitationRequest, OrganizationWorkflowApiClient, OrganizationWorkflowApiError,
         GROUP_ONBOARDING_DOB_LEGAL_PUBLISHED,
     },
-    workforce_api::{AcceptWorkforceInvitationRequest, WorkforceApiClient, WorkforceApiError},
+    workforce_api::{
+        AcceptWorkforceInvitationRequest, AcceptWorkforceInvitationResponse, WorkforceApiClient,
+        WorkforceApiError,
+    },
 };
 
 fn invitation_digits(value: &str) -> String {
@@ -73,7 +76,8 @@ pub fn JoinOrganizationPage() -> Element {
     let mut submitting = use_signal(|| false);
     let mut generation = use_signal(|| 0_u64);
     let mut error = use_signal(|| None::<String>);
-    let mut success = use_signal(|| false);
+    let mut success = use_signal(|| None::<AcceptWorkforceInvitationResponse>);
+    let mut group_success = use_signal(|| false);
     let group_token = use_signal(group_invitation_token);
     let mut first_name = use_signal(String::new);
     let mut last_name = use_signal(String::new);
@@ -96,10 +100,36 @@ pub fn JoinOrganizationPage() -> Element {
                 }
             }
             article { class: "journey-panel join-organization-card",
-                if success() {
+                if let Some(joined) = success() {
                     div { class: "journey-success", role: "status",
-                        h2 { "Организация добавлена" }
-                        p { "Она доступна в переключателе компаний. Текущая организация не была изменена." }
+                        h2 { "✓ Приглашение принято" }
+                        p { "Вы присоединились к:" }
+                        strong { "{joined.company_name}" }
+                        p { "Ресторан:" }
+                        strong {
+                            if joined.venue_names.is_empty() {
+                                "Без привязки к ресторану"
+                            } else {
+                                {joined.venue_names.join(", ")}
+                            }
+                        }
+                        p { "Должность:" }
+                        strong { "{joined.position_name}" }
+                        button {
+                            class: "btn-primary",
+                            r#type: "button",
+                            onclick: move |_| {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_hash("/today");
+                                }
+                            },
+                            "Перейти в RestOS"
+                        }
+                    }
+                } else if group_success() {
+                    div { class: "journey-success", role: "status",
+                        strong { "Организация добавлена" }
+                        p { "Доступ обновлён. Можно продолжать работу в RestOS." }
                     }
                 } else if group_token().is_some() && !GROUP_ONBOARDING_DOB_LEGAL_PUBLISHED {
                     div { class: "journey-empty", role: "status",
@@ -141,7 +171,7 @@ pub fn JoinOrganizationPage() -> Element {
                                     first_name.set(String::new());
                                     last_name.set(String::new());
                                     birth_date.set(String::new());
-                                    success.set(true);
+                                    group_success.set(true);
                                 }
                                 Err(problem) => error.set(Some(safe_group_error(&problem).into())),
                             }
@@ -188,7 +218,7 @@ pub fn JoinOrganizationPage() -> Element {
                                     Ok(_) => {
                                         if lifecycle_epoch() != epoch || generation() != operation_generation { return; }
                                         code.set(String::new());
-                                        success.set(true);
+                                        success.set(Some(value));
                                         lifecycle_epoch += 1;
                                     }
                                     Err(_) => error.set(Some("Организация добавлена, но список пока не обновился. Обновите страницу.".into())),
@@ -261,5 +291,18 @@ mod tests {
             assert!(!text.contains(forbidden));
         }
         assert!(!GROUP_ONBOARDING_DOB_LEGAL_PUBLISHED);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn accepted_invitation_surface_uses_projection_without_permission_inputs() {
+        let source = include_str!("join_organization.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(production.contains("✓ Приглашение принято"));
+        assert!(production.contains("joined.company_name"));
+        assert!(production.contains("joined.venue_names"));
+        assert!(production.contains("joined.position_name"));
+        assert!(!production.contains("access_profile_id"));
+        assert!(!production.contains("position_id"));
     }
 }

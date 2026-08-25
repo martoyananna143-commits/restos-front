@@ -303,7 +303,6 @@ pub struct WebRegistrationInput {
     pub invitation_code: String,
     pub phone_verification_challenge_id: Uuid,
     pub phone: String,
-    pub display_name: String,
     pub password: String,
     pub platform: String,
     pub device_display_name: Option<String>,
@@ -314,7 +313,6 @@ struct WebRegistrationRequest<'a> {
     invitation_code: &'a str,
     phone_verification_challenge_id: Uuid,
     phone: &'a str,
-    display_name: &'a str,
     password: &'a str,
     app_instance_id: Uuid,
     platform: &'a str,
@@ -339,6 +337,22 @@ pub struct WebRegistrationResponse {
     pub expires_at: String,
     pub token_type: String,
     pub display_name: String,
+    pub company_name: String,
+    pub position_name: String,
+    pub venue_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvitationAcceptance {
+    pub company_name: String,
+    pub position_name: String,
+    pub venue_names: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RegisteredInvitationSession {
+    pub session: RegisteredAccountSession,
+    pub acceptance: InvitationAcceptance,
 }
 
 #[derive(Clone, Debug)]
@@ -480,7 +494,7 @@ impl AccountApiClient {
         &self,
         identity_adapter: &DeviceIdentityAdapter,
         input: &WebRegistrationInput,
-    ) -> Result<RegisteredAccountSession, AccountApiError> {
+    ) -> Result<RegisteredInvitationSession, AccountApiError> {
         let identity = identity_adapter
             .get_or_create()
             .await
@@ -522,7 +536,6 @@ impl AccountApiClient {
                     invitation_code: &input.invitation_code,
                     phone_verification_challenge_id: input.phone_verification_challenge_id,
                     phone: &input.phone,
-                    display_name: &input.display_name,
                     password: &input.password,
                     app_instance_id,
                     platform: &input.platform,
@@ -538,10 +551,17 @@ impl AccountApiClient {
             .await?;
         let access_token = AccountAccessToken::from_server(registration.access_token)?;
         let bootstrap = self.bootstrap(&access_token).await?;
-        Ok(RegisteredAccountSession {
-            access_token,
-            expires_at: registration.expires_at,
-            bootstrap,
+        Ok(RegisteredInvitationSession {
+            session: RegisteredAccountSession {
+                access_token,
+                expires_at: registration.expires_at,
+                bootstrap,
+            },
+            acceptance: InvitationAcceptance {
+                company_name: registration.company_name,
+                position_name: registration.position_name,
+                venue_names: registration.venue_names,
+            },
         })
     }
 

@@ -126,7 +126,13 @@ pub fn AccountAuthPage(
     let identities = use_context::<DeviceIdentityAdapter>();
     let passkeys = use_context::<PasskeyAdapter>();
 
-    let mut mode = use_signal(|| Mode::Login);
+    let mut mode = use_signal(|| {
+        if invitation_entry_requested() {
+            Mode::Invitation
+        } else {
+            Mode::Login
+        }
+    });
     let mut busy = use_signal(|| false);
     let mut generation = use_signal(|| 0_u64);
     let mut error: Signal<Option<String>> = use_signal(|| None);
@@ -537,6 +543,21 @@ pub fn AccountAuthPage(
     }
 }
 
+fn invitation_entry_hash(hash: &str) -> bool {
+    hash == "#/invite"
+}
+
+fn invitation_entry_requested() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return web_sys::window()
+            .and_then(|window| window.location().hash().ok())
+            .is_some_and(|hash| invitation_entry_hash(&hash));
+    }
+    #[allow(unreachable_code)]
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +569,21 @@ mod tests {
         assert_ne!(Mode::Login, Mode::RegistrationPhone);
         assert_ne!(Mode::RegistrationPhone, Mode::ResetPhone);
         assert_ne!(Mode::AccountCreated, Mode::CreateCompany);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn invitation_entry_accepts_only_the_dedicated_code_free_route() {
+        assert!(invitation_entry_hash("#/invite"));
+        for rejected in [
+            "#/login",
+            "#/invite/123456",
+            "#/invite?code=123456",
+            "#/invite#123456",
+            "#/invitation",
+        ] {
+            assert!(!invitation_entry_hash(rejected));
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

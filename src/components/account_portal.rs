@@ -11,7 +11,8 @@ use wasm_bindgen::{closure::Closure, JsCast};
 
 use crate::{
     account_api::{
-        AccountApiClient, AccountApiError, SmsRequestInput, SmsVerifyInput, WebRegistrationInput,
+        AccountApiClient, AccountApiError, InvitationAcceptance, PasswordLoginInput,
+        SmsRequestInput, SmsVerifyInput, WebRegistrationInput,
     },
     account_session::{AccountSessionAdapter, AccountSessionState},
     assessment_management_api::{
@@ -26,6 +27,7 @@ use crate::{
     organization_access_api::{OrganizationAccessApiClient, OrganizationAccessProfile},
     passkey::{PasskeyAdapter, PasskeyError},
     passkey_api::{PasskeyApiClient, PasskeySummary},
+    workforce_api::{AcceptWorkforceInvitationRequest, WorkforceApiClient, WorkforceApiError},
 };
 
 use super::{
@@ -87,6 +89,7 @@ pub enum AccountAuthMode {
     Phone,
     SmsCode,
     RegistrationDetails,
+    ExistingAccount,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,6 +99,7 @@ pub enum UiOperation {
     VerifyingSms,
     Registering,
     AuthenticatingPasskey,
+    JoiningExistingAccount,
 }
 
 pub fn accepts_completion(current_generation: u64, completed_generation: u64) -> bool {
@@ -108,6 +112,28 @@ fn next_generation(current: u64) -> u64 {
 
 fn operation_is_idle(operation: UiOperation) -> bool {
     operation == UiOperation::Idle
+}
+
+fn safe_existing_invitation_error(error: &WorkforceApiError) -> &'static str {
+    match error {
+        WorkforceApiError::AuthenticationRequired => "Сессия недоступна. Войдите снова.",
+        WorkforceApiError::NetworkUnavailable => "Нет связи с сервером. Повторите вручную.",
+        WorkforceApiError::Conflict => "Приглашение уже принято этим аккаунтом.",
+        WorkforceApiError::PermissionDenied
+        | WorkforceApiError::InvalidRequest
+        | WorkforceApiError::InternalError => {
+            "Приглашение недоступно. Проверьте код или запросите новый."
+        }
+    }
+}
+
+fn safe_existing_login_error(error: &AccountApiError) -> &'static str {
+    match error {
+        AccountApiError::AuthenticationRequired
+        | AccountApiError::PermissionDenied
+        | AccountApiError::InvalidRequest => "Неверный номер телефона или пароль.",
+        _ => safe_account_error(error),
+    }
 }
 
 fn timestamp_millis(value: &str) -> Option<f64> {
@@ -236,8 +262,7 @@ pub fn InvitationAccountAuthPage(
     let api = use_context::<AccountApiClient>();
     let session = use_context::<AccountSessionAdapter>();
     let device_identities = use_context::<DeviceIdentityAdapter>();
-    let passkeys = use_context::<PasskeyAdapter>();
-
+    let workforce_api = use_context::<WorkforceApiClient>();
     let mut mode = use_signal(|| AccountAuthMode::Choice);
     let mut operation = use_signal(|| UiOperation::Idle);
     let mut generation = use_signal(|| 0_u64);
@@ -249,8 +274,8 @@ pub fn InvitationAccountAuthPage(
     let mut resend_available_at: Signal<Option<String>> = use_signal(|| None);
     let mut resend_ready = use_signal(|| false);
     let mut resend_timer_generation = use_signal(|| 0_u64);
-    let mut display_name = use_signal(String::new);
     let mut password = use_signal(String::new);
+    let mut acceptance = use_signal(|| None::<InvitationAcceptance>);
     let mut personal_data_consent = use_signal(|| false);
     let mut authorization_sms_consent = use_signal(|| false);
 
@@ -267,8 +292,8 @@ pub fn InvitationAccountAuthPage(
         resend_available_at.set(None);
         resend_ready.set(false);
         resend_timer_generation.set(next_generation(resend_timer_generation()));
-        display_name.set(String::new());
         password.set(String::new());
+        acceptance.set(None);
         personal_data_consent.set(false);
         authorization_sms_consent.set(false);
     };
@@ -287,9 +312,9 @@ pub fn InvitationAccountAuthPage(
                 div { class: "auth-header",
                     img { class: "account-auth-mark", src: "/icons/icon-192.png", alt: "" }
                     div { class: "auth-title", "RestOS" }
-                    h1 { class: "account-auth-heading", "Регистрация по приглашению" }
+                    h1 { class: "account-auth-heading", "Вас пригласили в RestOS" }
                     p { class: "auth-subtitle",
-                        "Используйте ключ доступа или приглашение и номер телефона."
+                        "Введите код из SMS. Код не передаётся в ссылке и доступен только вам."
                     }
                 }
 
@@ -297,78 +322,74 @@ pub fn InvitationAccountAuthPage(
                     if let Some(message) = error() { "{message}" }
                 }
 
-                match mode() {
+                if let Some(joined) = acceptance() {
+                    div { class: "auth-form invitation-accepted", role: "status",
+                        h2 { "✓ Приглашение принято" }
+                        p { "Вы присоединились к:" }
+                        strong { "{joined.company_name}" }
+                        p { "Ресторан:" }
+                        strong {
+                            if joined.venue_names.is_empty() {
+                                "Без привязки к ресторану"
+                            } else {
+                                {joined.venue_names.join(", ")}
+                            }
+                        }
+                        p { "Должность:" }
+                        strong { "{joined.position_name}" }
+                        button {
+                            class: "btn-primary w-full",
+                            r#type: "button",
+                            onclick: move |_| {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_hash("/today");
+                                }
+                                on_authenticated.call(());
+                            },
+                            "Перейти в RestOS"
+                        }
+                    }
+                } else { match mode() {
                     AccountAuthMode::Choice => rsx! {
                         div { class: "auth-form",
+                            div { class: "form-field",
+                                label { class: "field-label", r#for: "account-invitation", "Введите код из SMS" }
+                                input {
+                                    id: "account-invitation", class: "field-input", inputmode: "numeric",
+                                    autocomplete: "one-time-code", maxlength: "6", value: "{invitation}",
+                                    oninput: move |event| {
+                                        invitation.set(event.value().chars().filter(|value| value.is_ascii_digit()).take(6).collect());
+                                        error.set(None);
+                                    },
+                                }
+                            }
                             button {
                                 class: "btn-primary w-full",
                                 r#type: "button",
-                                disabled: operation() != UiOperation::Idle,
+                                disabled: operation() != UiOperation::Idle || invitation().len() != 6,
                                 onclick: move |_| {
-                                    if operation() != UiOperation::Idle { return; }
+                                    if operation() != UiOperation::Idle || invitation().len() != 6 { return; }
                                     error.set(None);
-                                    if !PasskeyAdapter::is_supported() {
-                                        error.set(safe_passkey_error(&PasskeyError::Unavailable).map(str::to_string));
-                                        return;
-                                    }
-                                    operation.set(UiOperation::AuthenticatingPasskey);
-                                    generation += 1;
-                                    let operation_generation = generation();
-                                    let passkeys = passkeys.clone();
-                                    let session = session.clone();
-                                    spawn(async move {
-                                        let result = passkeys.authenticate(&session, "web", Some("Этот браузер".into())).await;
-                                        if !accepts_completion(generation(), operation_generation) { return; }
-                                        operation.set(UiOperation::Idle);
-                                        match result {
-                                            Ok(()) => on_authenticated.call(()),
-                                            Err(problem) => {
-                                                error.set(safe_passkey_error(&problem).map(str::to_string));
-                                            }
-                                        }
-                                    });
+                                    mode.set(AccountAuthMode::Phone);
                                 },
-                                if operation() == UiOperation::AuthenticatingPasskey {
-                                    "Ожидание устройства..."
-                                } else {
-                                    "Войти с Face ID или ключом доступа"
-                                }
-                            }
-                            p { class: "account-auth-help",
-                                "Используйте Face ID, Touch ID, Windows Hello или код устройства."
-                            }
-                            button {
-                                class: "btn-secondary w-full",
-                                r#type: "button",
-                                disabled: operation() != UiOperation::Idle,
-                                onclick: move |_| { error.set(None); mode.set(AccountAuthMode::Phone); },
-                                "Войти или зарегистрироваться по телефону"
+                                "Продолжить"
                             }
                             button {
                                 class: "btn-ghost account-auth-link",
                                 r#type: "button",
-                                onclick: move |_| on_standalone.call(()),
-                                "Обычный вход"
-                            }
-                            button {
-                                class: "btn-ghost account-auth-link",
-                                r#type: "button",
-                                onclick: move |_| on_legacy_login.call(()),
-                                "Старый вход для существующей версии"
+                                onclick: move |_| {
+                                    error.set(None);
+                                    phone.set(String::new());
+                                    password.set(String::new());
+                                    mode.set(AccountAuthMode::ExistingAccount);
+                                },
+                                "У меня уже есть аккаунт"
                             }
                             AccountLegalNotice { context: AccountLegalContext::Login }
                         }
                     },
                     AccountAuthMode::Phone => rsx! {
                         div { class: "auth-form",
-                            div { class: "form-field",
-                                label { class: "field-label", r#for: "account-invitation", "Код приглашения" }
-                                input {
-                                    id: "account-invitation", class: "field-input", inputmode: "numeric",
-                                    autocomplete: "off", maxlength: "6", value: "{invitation}",
-                                    oninput: move |event| invitation.set(event.value().chars().filter(|value| value.is_ascii_digit()).take(6).collect()),
-                                }
-                            }
                             RussianPhoneInput {
                                 id: "account-phone".to_string(),
                                 label: "Номер телефона".to_string(),
@@ -419,7 +440,25 @@ pub fn InvitationAccountAuthPage(
                                 },
                                 if operation() == UiOperation::RequestingSms { "Отправка..." } else { "Получить код" }
                             }
-                            button { class: "btn-ghost account-auth-link", r#type: "button", onclick: move |_| cancel(), "Назад" }
+                            button {
+                                class: "btn-ghost account-auth-link",
+                                r#type: "button",
+                                disabled: operation() != UiOperation::Idle,
+                                onclick: move |_| on_standalone.call(()),
+                                "У меня уже есть аккаунт"
+                            }
+                            button {
+                                class: "btn-ghost account-auth-link",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    phone.set(String::new());
+                                    personal_data_consent.set(false);
+                                    authorization_sms_consent.set(false);
+                                    error.set(None);
+                                    mode.set(AccountAuthMode::Choice);
+                                },
+                                "Назад"
+                            }
                         }
                     },
                     AccountAuthMode::SmsCode => {
@@ -525,10 +564,7 @@ pub fn InvitationAccountAuthPage(
                     },
                     AccountAuthMode::RegistrationDetails => rsx! {
                         div { class: "auth-form",
-                            div { class: "form-field",
-                                label { class: "field-label", r#for: "account-name", "ФИО" }
-                                input { id: "account-name", class: "field-input", autocomplete: "name", value: "{display_name}", oninput: move |event| display_name.set(event.value()) }
-                            }
+                            p { class: "account-auth-help", "Имя, организация, ресторан, должность и доступ уже заданы руководителем." }
                             div { class: "form-field",
                                 label { class: "field-label", r#for: "account-password", "Пароль" }
                                 input { id: "account-password", class: "field-input", r#type: "password", autocomplete: "new-password", minlength: "12", maxlength: "72", value: "{password}", oninput: move |event| password.set(event.value()) }
@@ -540,8 +576,8 @@ pub fn InvitationAccountAuthPage(
                                 onclick: move |_| {
                                     if operation() != UiOperation::Idle { return; }
                                     let Some(challenge_id) = sms_challenge() else { error.set(Some("Запросите новый код.".into())); return; };
-                                    if display_name().trim().is_empty() || password().len() < 12 || password().len() > 72 {
-                                        error.set(Some("Укажите имя и пароль длиной от 12 до 72 символов.".into())); return;
+                                    if password().len() < 12 || password().len() > 72 {
+                                        error.set(Some("Укажите пароль длиной от 12 до 72 символов.".into())); return;
                                     }
                                     operation.set(UiOperation::Registering);
                                     generation += 1;
@@ -552,7 +588,7 @@ pub fn InvitationAccountAuthPage(
                                     let Some(canonical_phone) = canonical_russian_phone(&phone()) else { error.set(Some("Проверьте номер телефона.".into())); return; };
                                     let request = WebRegistrationInput {
                                         invitation_code: invitation(), phone_verification_challenge_id: challenge_id,
-                                        phone: canonical_phone, display_name: display_name().trim().to_string(), password: password(),
+                                        phone: canonical_phone, password: password(),
                                         platform: "web".into(), device_display_name: Some("Браузер RestOS".into()),
                                     };
                                     spawn(async move {
@@ -561,11 +597,12 @@ pub fn InvitationAccountAuthPage(
                                         operation.set(UiOperation::Idle);
                                         match result {
                                             Ok(registered) => {
-                                                session.accept_registered_session(registered);
+                                                let joined = registered.acceptance.clone();
+                                                session.accept_registered_session(registered.session);
                                                 let (cleared_invitation, cleared_otp) = cleared_sensitive_auth_fields();
                                                 invitation.set(cleared_invitation); phone.set(String::new()); otp.set(cleared_otp); password.set(String::new());
                                                 sms_challenge.set(None); resend_available_at.set(None); resend_ready.set(false); resend_timer_generation += 1; error.set(None);
-                                                on_authenticated.call(());
+                                                acceptance.set(Some(joined));
                                             }
                                             Err(problem) => error.set(Some(safe_account_error(&problem).into())),
                                         }
@@ -576,7 +613,155 @@ pub fn InvitationAccountAuthPage(
                             button { class: "btn-ghost account-auth-link", r#type: "button", onclick: move |_| cancel(), "Отмена" }
                         }
                     },
-                }
+                    AccountAuthMode::ExistingAccount => {
+                        let login_api = api.clone();
+                        let login_identities = device_identities.clone();
+                        let login_session = session.clone();
+                        let accept_api = workforce_api.clone();
+                        rsx! {
+                            form {
+                                class: "auth-form",
+                                onsubmit: move |event| {
+                                    event.prevent_default();
+                                    if operation() != UiOperation::Idle || invitation().len() != 6 {
+                                        return;
+                                    }
+                                    let Some(canonical_phone) = canonical_russian_phone(&phone()) else {
+                                        error.set(Some("Проверьте номер телефона и пароль.".into()));
+                                        return;
+                                    };
+                                    if password().is_empty() {
+                                        error.set(Some("Проверьте номер телефона и пароль.".into()));
+                                        return;
+                                    }
+                                    operation.set(UiOperation::JoiningExistingAccount);
+                                    generation += 1;
+                                    let operation_generation = generation();
+                                    let api = login_api.clone();
+                                    let identities = login_identities.clone();
+                                    let session = login_session.clone();
+                                    let workforce = accept_api.clone();
+                                    let login = PasswordLoginInput {
+                                        phone: canonical_phone,
+                                        password: password(),
+                                        platform: "web".into(),
+                                        device_display_name: Some("Браузер RestOS".into()),
+                                    };
+                                    let accept = AcceptWorkforceInvitationRequest {
+                                        invitation_code: invitation(),
+                                    };
+                                    spawn(async move {
+                                        let registered = match api.password_login(&identities, &login).await {
+                                            Ok(registered) => registered,
+                                            Err(problem) => {
+                                                if accepts_completion(generation(), operation_generation) {
+                                                    operation.set(UiOperation::Idle);
+                                                    error.set(Some(safe_existing_login_error(&problem).into()));
+                                                }
+                                                return;
+                                            }
+                                        };
+                                        let result = workforce
+                                            .accept_invitation(&registered.access_token, &accept)
+                                            .await;
+                                        if !accepts_completion(generation(), operation_generation) {
+                                            return;
+                                        }
+                                        operation.set(UiOperation::Idle);
+                                        match result {
+                                            Ok(joined) if joined.joined => {
+                                                session.accept_registered_session(registered);
+                                                match session.reload_bootstrap().await {
+                                                    Ok(_) => {
+                                                        let accepted = InvitationAcceptance {
+                                                            company_name: joined.company_name,
+                                                            position_name: joined.position_name,
+                                                            venue_names: joined.venue_names,
+                                                        };
+                                                        let (cleared_invitation, cleared_otp) = cleared_sensitive_auth_fields();
+                                                        invitation.set(cleared_invitation);
+                                                        phone.set(String::new());
+                                                        otp.set(cleared_otp);
+                                                        password.set(String::new());
+                                                        error.set(None);
+                                                        acceptance.set(Some(accepted));
+                                                    }
+                                                    Err(_) => error.set(Some("Приглашение принято. Обновите страницу, чтобы продолжить.".into())),
+                                                }
+                                            }
+                                            Ok(_) => error.set(Some("Приглашение недоступно. Проверьте код или запросите новый.".into())),
+                                            Err(problem) => error.set(Some(safe_existing_invitation_error(&problem).into())),
+                                        }
+                                    });
+                                },
+                                RussianPhoneInput {
+                                    id: "existing-invitation-phone".to_string(),
+                                    label: "Номер телефона".to_string(),
+                                    value: phone(),
+                                    invalid: false,
+                                    disabled: operation() != UiOperation::Idle,
+                                    described_by: String::new(),
+                                    on_change: move |digits| {
+                                        phone.set(digits);
+                                        error.set(None);
+                                    }
+                                }
+                                div { class: "form-field",
+                                    label { class: "field-label", r#for: "existing-invitation-password", "Пароль" }
+                                    input {
+                                        id: "existing-invitation-password",
+                                        class: "field-input",
+                                        r#type: "password",
+                                        autocomplete: "current-password",
+                                        maxlength: "72",
+                                        value: "{password}",
+                                        disabled: operation() != UiOperation::Idle,
+                                        oninput: move |event| {
+                                            password.set(event.value());
+                                            error.set(None);
+                                        },
+                                    }
+                                }
+                                button {
+                                    class: "btn-primary w-full",
+                                    r#type: "submit",
+                                    disabled: operation() != UiOperation::Idle || !russian_phone_is_complete(&phone()) || password().is_empty(),
+                                    if operation() == UiOperation::JoiningExistingAccount {
+                                        "Присоединение..."
+                                    } else {
+                                        "Войти и принять приглашение"
+                                    }
+                                }
+                                button {
+                                    class: "btn-ghost account-auth-link",
+                                    r#type: "button",
+                                    disabled: operation() != UiOperation::Idle,
+                                    onclick: move |_| {
+                                        phone.set(String::new());
+                                        password.set(String::new());
+                                        error.set(None);
+                                        mode.set(AccountAuthMode::Choice);
+                                    },
+                                    "Назад"
+                                }
+                                button {
+                                    class: "btn-ghost account-auth-link",
+                                    r#type: "button",
+                                    disabled: operation() != UiOperation::Idle,
+                                    onclick: move |_| on_standalone.call(()),
+                                    "Войти без приглашения"
+                                }
+                                button {
+                                    class: "btn-ghost account-auth-link",
+                                    r#type: "button",
+                                    disabled: operation() != UiOperation::Idle,
+                                    onclick: move |_| on_legacy_login.call(()),
+                                    "Старый вход для существующей версии"
+                                }
+                            }
+                        }
+                    },
+                } }
                 }
             }
         }
@@ -600,6 +785,13 @@ impl Drop for AccountHashListener {
 }
 
 fn initial_account_navigation() -> NavigationId {
+    #[cfg(target_arch = "wasm32")]
+    if web_sys::window()
+        .and_then(|window| window.location().hash().ok())
+        .is_some_and(|hash| hash == "#/invite")
+    {
+        return NavigationId::JoinOrganization;
+    }
     if super::join_organization::group_invitation_token().is_some() {
         return NavigationId::JoinOrganization;
     }
@@ -622,8 +814,13 @@ fn install_account_hash_listener(mut active: Signal<NavigationId>) -> Option<Acc
             .location()
             .hash()
             .ok()
-            .and_then(|hash| resolve_hash(&hash))
-            .unwrap_or(NavigationId::Today);
+            .map_or(NavigationId::Today, |hash| {
+                if hash == "#/invite" {
+                    NavigationId::JoinOrganization
+                } else {
+                    resolve_hash(&hash).unwrap_or(NavigationId::Today)
+                }
+            });
         active.set(next);
     });
     window
@@ -1646,6 +1843,29 @@ mod tests {
         let safe = safe_account_error(&AccountApiError::InvalidRequest);
         assert!(!safe.contains("123456"));
         assert!(!safe.contains("654321"));
+    }
+
+    #[wasm_bindgen_test]
+    fn invitation_entry_is_code_only_and_success_routes_to_today() {
+        let source = include_str!("account_portal.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(production.contains("Вас пригласили в RestOS"));
+        assert!(production.contains("Введите код из SMS"));
+        assert!(production.contains("autocomplete: \"one-time-code\""));
+        assert!(production.contains("use_signal(|| AccountAuthMode::Choice)"));
+        assert_eq!(production.matches("id: \"account-invitation\"").count(), 1);
+        assert!(production.contains("invitation().len() != 6"));
+        assert!(production.contains("AccountAuthMode::ExistingAccount"));
+        assert!(production.contains("api.password_login(&identities, &login)"));
+        assert!(production.contains("accept_invitation(&registered.access_token, &accept)"));
+        assert!(production.contains("session.reload_bootstrap().await"));
+        assert_eq!(
+            safe_existing_login_error(&AccountApiError::AuthenticationRequired),
+            safe_existing_login_error(&AccountApiError::InvalidRequest)
+        );
+        assert!(production.contains("window.location().set_hash(\"/today\")"));
+        assert!(!production.contains("invite?code="));
+        assert!(!production.contains("#/invite/"));
     }
 
     #[wasm_bindgen_test]

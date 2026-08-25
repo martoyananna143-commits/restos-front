@@ -183,7 +183,7 @@ mod tests {
         let workforce = production(include_str!("workforce_onboarding.rs"));
 
         assert_eq!(standalone.matches("RussianPhoneInput {").count(), 2);
-        assert_eq!(invitation.matches("RussianPhoneInput {").count(), 1);
+        assert_eq!(invitation.matches("RussianPhoneInput {").count(), 2);
         assert_eq!(workforce.matches("RussianPhoneInput {").count(), 1);
         for source in [standalone, invitation, workforce] {
             assert!(!source.contains("r#type: \"tel\""));
@@ -194,6 +194,7 @@ mod tests {
         assert!(standalone.contains("PasswordLoginInput { phone: canonical_phone"));
         assert!(invitation
             .contains("SmsRequestInput { invitation_code: invitation(), phone: canonical_phone"));
+        assert!(invitation.contains("id: \"existing-invitation-phone\".to_string()"));
         assert!(workforce.contains("canonical_russian_phone(&employee_phone())"));
     }
 }

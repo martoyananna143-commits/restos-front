@@ -28,6 +28,22 @@ fn create_is_admitted(name: &str, phone: &str, in_flight: bool, read_only: bool)
         && !read_only
 }
 
+fn position_is_admitted(position_id: Option<Uuid>) -> bool {
+    position_id.is_some()
+}
+
+fn delivery_is_retryable(status: &str) -> bool {
+    status == "failed"
+}
+
+fn delivery_result_class(status: &str) -> &'static str {
+    match status {
+        "sent" => "card card-green workforce-invitation-result",
+        "failed" => "error-card workforce-invitation-result",
+        _ => "card card-glass workforce-invitation-result",
+    }
+}
+
 fn safe_workforce_error(error: &WorkforceApiError) -> &'static str {
     match error {
         WorkforceApiError::AuthenticationRequired => "Сессия недоступна. Войдите снова.",
@@ -73,6 +89,7 @@ pub fn WorkforceOnboardingPage() -> Element {
     let mut employee_name = use_signal(String::new);
     let mut employee_phone = use_signal(String::new);
     let mut selected_venue = use_signal(|| None::<Uuid>);
+    let mut selected_position = use_signal(|| None::<Uuid>);
     let mut request_id = use_signal(|| None::<Uuid>);
     let mut creating = use_signal(|| false);
     let mut operation_generation = use_signal(|| 0_u64);
@@ -99,8 +116,31 @@ pub fn WorkforceOnboardingPage() -> Element {
         }
     });
 
+    let position_session = session.clone();
+    let position_api = api.clone();
+    let positions = use_resource(move || {
+        let _reload = reload();
+        let epoch = lifecycle_epoch();
+        let session = position_session.clone();
+        let api = position_api.clone();
+        async move {
+            let Some((token, company_id)) = current_scope(&session) else {
+                return Err(WorkforceApiError::AuthenticationRequired);
+            };
+            let result = api.positions(&token, company_id).await;
+            if lifecycle_epoch() != epoch {
+                return Err(WorkforceApiError::AuthenticationRequired);
+            }
+            result
+        }
+    });
+
     let create_session = session.clone();
     let create_api = api.clone();
+    let retry_session = session.clone();
+    let retry_api = api.clone();
+    let status_session = session.clone();
+    let status_api = api.clone();
     let read_only = current_scope(&session).is_none();
 
     rsx! {
@@ -109,26 +149,110 @@ pub fn WorkforceOnboardingPage() -> Element {
                 div {
                     p { class: "management-eyebrow", "RESTOS • КОМАНДА" }
                     h1 { id: "workforce-title", "Пригласить одного сотрудника" }
-                    p { "Создайте одноразовый код и передайте его сотруднику безопасным способом." }
+                    p { "Укажите номер сотрудника — RestOS отправит приглашение по SMS." }
                 }
             }
             if let Some(result) = created() {
-                div { class: "card card-green workforce-invitation-result", role: "status",
-                    p { class: "heading-md", "Приглашение готово" }
-                    p { "Код действует ограниченное время и показывается только в этом рабочем процессе." }
-                    output { class: "workforce-invitation-code", aria_label: "Код приглашения", "{result.invitation_code}" }
-                    p { class: "account-auth-help", "Не отправляйте код в публичные чаты и не сохраняйте его в браузере." }
-                    button {
-                        class: "btn-secondary", r#type: "button",
-                        onclick: move |_| {
-                            created.set(None);
-                            employee_name.set(String::new());
-                            employee_phone.set(String::new());
-                            selected_venue.set(None);
-                            request_id.set(None);
-                            error.set(None);
-                        },
-                        "Пригласить ещё"
+                div { class: delivery_result_class(&result.delivery_status), role: "status",
+                    if result.delivery_status == "sent" {
+                        p { class: "heading-md", "Приглашение отправлено" }
+                        p { "Приглашение отправлено на {result.masked_phone}." }
+                        p { "Статус приглашения: {result.invitation_status}." }
+                        button {
+                            class: "btn-secondary", r#type: "button", disabled: creating(),
+                            onclick: move |_| {
+                                let Some((token, company_id)) = current_scope(&status_session) else {
+                                    error.set(Some("Сессия недоступна. Войдите снова.".into()));
+                                    return;
+                                };
+                                creating.set(true);
+                                error.set(None);
+                                operation_generation += 1;
+                                let generation = operation_generation();
+                                let epoch = lifecycle_epoch();
+                                let api = status_api.clone();
+                                let invitation_id = result.invitation_id;
+                                spawn(async move {
+                                    let status = api.invitation_status(&token, company_id, invitation_id).await;
+                                    if lifecycle_epoch() != epoch || operation_generation() != generation { return; }
+                                    creating.set(false);
+                                    match status {
+                                        Ok(status) => created.with_mut(|current| {
+                                            if let Some(current) = current {
+                                                current.invitation_status = status.invitation_status;
+                                                current.delivery_status = status.delivery_status;
+                                            }
+                                        }),
+                                        Err(problem) => error.set(Some(safe_workforce_error(&problem).into())),
+                                    }
+                                });
+                            },
+                            if creating() { "Проверка..." } else { "Проверить статус" }
+                        }
+                        button {
+                            class: "btn-secondary", r#type: "button",
+                            onclick: move |_| {
+                                created.set(None);
+                                employee_name.set(String::new());
+                                employee_phone.set(String::new());
+                                selected_venue.set(None);
+                                selected_position.set(None);
+                                request_id.set(None);
+                                error.set(None);
+                            },
+                            "Пригласить ещё"
+                        }
+                    } else if result.delivery_status == "failed" {
+                        p { class: "heading-md", "Не удалось отправить приглашение" }
+                        p { "SMS на номер {result.masked_phone} не отправлено. Повторите вручную." }
+                        button {
+                            class: "btn-primary", r#type: "button", disabled: creating(),
+                            onclick: move |_| {
+                                let Some(name) = normalized_employee_name(&employee_name()) else { return; };
+                                let Some(phone) = canonical_russian_phone(&employee_phone()) else { return; };
+                                let Some(position_id) = selected_position() else { return; };
+                                let Some(operation_request_id) = request_id() else { return; };
+                                let Some((token, company_id)) = current_scope(&retry_session) else {
+                                    error.set(Some("Сессия недоступна. Войдите снова.".into()));
+                                    return;
+                                };
+                                creating.set(true);
+                                error.set(None);
+                                operation_generation += 1;
+                                let generation = operation_generation();
+                                let epoch = lifecycle_epoch();
+                                let api = retry_api.clone();
+                                let request = CreateWorkforceInvitationRequest {
+                                    request_id: operation_request_id,
+                                    employee_name: name,
+                                    phone,
+                                    position_id,
+                                    venue_id: selected_venue(),
+                                };
+                                spawn(async move {
+                                    let retry_result = api.create_invitation(&token, company_id, &request).await;
+                                    if lifecycle_epoch() != epoch || operation_generation() != generation {
+                                        return;
+                                    }
+                                    creating.set(false);
+                                    match retry_result {
+                                        Ok(value) => {
+                                            let retryable = delivery_is_retryable(&value.delivery_status);
+                                            created.set(Some(value));
+                                            if !retryable {
+                                                employee_phone.set(String::new());
+                                                request_id.set(None);
+                                            }
+                                        }
+                                        Err(problem) => error.set(Some(safe_workforce_error(&problem).into())),
+                                    }
+                                });
+                            },
+                            if creating() { "Отправка..." } else { "Повторить отправку" }
+                        }
+                    } else {
+                        p { class: "heading-md", "Доставка приглашения подтверждается" }
+                        p { "Статус SMS на номер {result.masked_phone} пока неизвестен. Повторная отправка заблокирована, чтобы сотрудник не получил несколько сообщений." }
                     }
                 }
             } else {
@@ -162,7 +286,32 @@ pub fn WorkforceOnboardingPage() -> Element {
                         }
                     }
                     p { id: "workforce-phone-help", class: "account-auth-help",
-                        "Код подтверждения будет отправлен на указанный номер."
+                        "Приглашение будет отправлено на указанный номер."
+                    }
+                    match positions() {
+                        None => rsx! { p { class: "account-auth-help", "Загрузка должностей и доступа..." } },
+                        Some(Err(_)) => rsx! {
+                            div { class: "error-msg", role: "alert", "Не удалось загрузить должности. Повторите вручную." }
+                            button { class: "btn-secondary", r#type: "button", onclick: move |_| reload += 1, "Повторить загрузку" }
+                        },
+                        Some(Ok(items)) => rsx! {
+                            div { class: "form-field",
+                                label { class: "field-label", r#for: "workforce-position", "Должность и профиль доступа" }
+                                select {
+                                    id: "workforce-position", class: "field-input", disabled: creating() || read_only,
+                                    value: selected_position().map(|value| value.to_string()).unwrap_or_default(),
+                                    onchange: move |event| {
+                                        selected_position.set(Uuid::parse_str(&event.value()).ok());
+                                        request_id.set(None);
+                                        error.set(None);
+                                    },
+                                    option { value: "", "Выберите должность" }
+                                    for position in items {
+                                        option { key: "{position.position_id}", value: "{position.position_id}", "{position.position_name} — {position.access_profile_name}" }
+                                    }
+                                }
+                            }
+                        },
                     }
                     match venues() {
                         None => rsx! { p { class: "account-auth-help", "Загрузка объектов..." } },
@@ -192,10 +341,11 @@ pub fn WorkforceOnboardingPage() -> Element {
                     }
                     button {
                         class: "btn-primary", r#type: "button",
-                        disabled: !create_is_admitted(&employee_name(), &employee_phone(), creating(), read_only),
+                        disabled: !create_is_admitted(&employee_name(), &employee_phone(), creating(), read_only) || !position_is_admitted(selected_position()),
                         onclick: move |_| {
                             let Some(name) = normalized_employee_name(&employee_name()) else { return; };
                             let Some(phone) = canonical_russian_phone(&employee_phone()) else { return; };
+                            let Some(position_id) = selected_position() else { return; };
                             let Some((token, company_id)) = current_scope(&create_session) else {
                                 error.set(Some("Сессия недоступна. Войдите снова.".into()));
                                 return;
@@ -221,6 +371,7 @@ pub fn WorkforceOnboardingPage() -> Element {
                                 request_id: operation_request_id,
                                 employee_name: name,
                                 phone,
+                                position_id,
                                 venue_id: selected_venue(),
                             };
                             spawn(async move {
@@ -231,15 +382,18 @@ pub fn WorkforceOnboardingPage() -> Element {
                                 creating.set(false);
                                 match result {
                                     Ok(value) => {
+                                        let retryable = delivery_is_retryable(&value.delivery_status);
                                         created.set(Some(value));
-                                        employee_phone.set(String::new());
-                                        request_id.set(None);
+                                        if !retryable {
+                                            employee_phone.set(String::new());
+                                            request_id.set(None);
+                                        }
                                     }
                                     Err(problem) => error.set(Some(safe_workforce_error(&problem).into())),
                                 }
                             });
                         },
-                        if creating() { "Создание..." } else if error().is_some() { "Повторить создание" } else { "Создать приглашение" }
+                        if creating() { "Отправка..." } else if error().is_some() { "Повторить отправку" } else { "Отправить приглашение" }
                     }
                 }
             }
@@ -318,6 +472,31 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn only_definitive_failure_is_retryable_and_states_remain_distinct() {
+        assert!(delivery_is_retryable("failed"));
+        for status in ["sent", "delivery_pending", "unknown", "accepted"] {
+            assert!(!delivery_is_retryable(status));
+        }
+        assert!(delivery_result_class("sent").contains("card-green"));
+        assert!(delivery_result_class("failed").contains("error-card"));
+        assert!(delivery_result_class("unknown").contains("card-glass"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn owner_surface_never_renders_plaintext_invitation_code() {
+        let source = include_str!("workforce_onboarding.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source section must exist");
+        assert!(!production.contains("invitation_code"));
+        assert!(!production.contains("Код приглашения:"));
+        assert!(production.contains("masked_phone"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn public_errors_do_not_enumerate_company_or_employee() {
         for error in [
             WorkforceApiError::PermissionDenied,
@@ -339,5 +518,16 @@ mod tests {
         assert!(production.contains("Пригласить одного сотрудника"));
         assert!(!production.contains("date_of_birth"));
         assert!(!production.contains("birth_date"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn owner_selects_position_but_never_selects_access_profile_directly() {
+        let source = include_str!("workforce_onboarding.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(production.contains("position_id"));
+        assert!(production.contains("access_profile_name"));
+        assert!(!production.contains("selected_access_profile"));
+        assert!(!production.contains("invitation_code"));
     }
 }
